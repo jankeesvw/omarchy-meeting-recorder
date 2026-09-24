@@ -251,34 +251,24 @@ fn mix(mic: &[f32], computer: &[f32]) -> Vec<f32> {
         .collect()
 }
 
-/// Energy per 10 ms of both tracks, to tell who is speaking at any moment.
-/// Small enough to copy into callbacks: an hour is 360 000 values per track.
-#[derive(Clone)]
-struct Voices {
-    mic: Vec<f32>,
-    computer: Vec<f32>,
-}
-
-/// Who speaks when: read off the two tracks of a recording, or found in the
-/// voices of a single imported file.
+/// Who speaks when: one side of a recording (its own track, so its own
+/// speaker, split further when several voices share it), or the voices found
+/// in a single imported file.
 #[derive(Clone)]
 enum Speakers {
-    /// The two tracks of a recording, and who is who on the computer audio
-    /// when more than one voice is heard there.
-    Tracks(Voices, Vec<crate::diarize::Turn>),
+    /// Everything on this track is `label`; with turns, `label 1`, `label 2`, ...
+    Side(&'static str, Vec<crate::diarize::Turn>),
     Turns(Vec<crate::diarize::Turn>),
 }
 
 impl Speakers {
     fn speaker(&self, start_ms: i64, end_ms: i64) -> String {
         match self {
-            Speakers::Tracks(voices, remote) => match voices.speaker(start_ms, end_ms) {
-                "Remote" if !remote.is_empty() => format!(
-                    "Remote {}",
-                    crate::diarize::speaker_at(remote, start_ms, end_ms) + 1
-                ),
-                side => side.to_owned(),
-            },
+            Speakers::Side(label, turns) if turns.is_empty() => (*label).to_owned(),
+            Speakers::Side(label, turns) => format!(
+                "{label} {}",
+                crate::diarize::speaker_at(turns, start_ms, end_ms) + 1
+            ),
             Speakers::Turns(turns) => {
                 format!(
                     "Speaker {}",
@@ -291,103 +281,22 @@ impl Speakers {
     /// Where `speaker` starts talking near `around_ms`, if that can be told
     /// more precisely than whisper's word times.
     fn takeover_ms(&self, speaker: &str, around_ms: i64) -> Option<i64> {
-        match self {
-            Speakers::Tracks(voices, remote) => {
-                let index = speaker
-                    .strip_prefix("Remote ")
-                    .and_then(|n| n.parse::<usize>().ok());
-                match index {
-                    Some(index) => crate::diarize::turn_start_near(remote, index - 1, around_ms)
-                        .or_else(|| voices.takeover_ms("Remote", around_ms)),
-                    None => voices.takeover_ms(speaker, around_ms),
-                }
-            }
-            Speakers::Turns(turns) => {
-                let index = speaker.strip_prefix("Speaker ")?.parse::<usize>().ok()?;
-                crate::diarize::turn_start_near(turns, index.checked_sub(1)?, around_ms)
-            }
-        }
+        let (turns, prefix) = match self {
+            Speakers::Side(label, turns) => (turns, format!("{label} ")),
+            Speakers::Turns(turns) => (turns, "Speaker ".to_owned()),
+        };
+        let index = speaker.strip_prefix(&prefix)?.parse::<usize>().ok()?;
+        crate::diarize::turn_start_near(turns, index.checked_sub(1)?, around_ms)
     }
 
     /// With diarization a whisper segment can hold two voices without a
     /// sentence end between them, so a line is also cut at a pause where the
     /// speaker changes. Never inside a run of words: a sentence stays whole.
-    /// The two-track levels are too jumpy per word for this.
     fn cuts_at_pauses(&self) -> bool {
-        matches!(self, Speakers::Turns(_))
-    }
-}
-
-const ENERGY_MS: usize = 10;
-
-impl Voices {
-    fn new(mic: &[f32], computer: &[f32]) -> Self {
-        let frame = WHISPER_RATE * ENERGY_MS / 1000;
-        let energy = |track: &[f32]| -> Vec<f32> {
-            track
-                .chunks(frame)
-                .map(|c| c.iter().map(|s| s * s).sum())
-                .collect()
-        };
-        // Each track relative to its own background: steady sound on one side
-        // (music, a fan) must not outweigh speech on the other. The floor has a
-        // minimum around -66 dBFS, so digital silence does not divide by zero.
-        let relative = |frames: Vec<f32>| -> Vec<f32> {
-            let mut sorted = frames.clone();
-            sorted.sort_by(f32::total_cmp);
-            let floor = sorted
-                .get(sorted.len() / 5)
-                .copied()
-                .unwrap_or(0.0)
-                .max(frame as f32 * 0.0005 * 0.0005);
-            frames.into_iter().map(|e| e / floor).collect()
-        };
-        Voices {
-            mic: relative(energy(mic)),
-            computer: relative(energy(computer)),
+        match self {
+            Speakers::Side(_, turns) => !turns.is_empty(),
+            Speakers::Turns(_) => true,
         }
-    }
-
-    /// "You" when the mic stands out more over the span, "Remote" when the
-    /// computer audio does, each measured against its own background. Echo of
-    /// the other side in the mic stands out less than the original does.
-    fn speaker(&self, start_ms: i64, end_ms: i64) -> &'static str {
-        let a = start_ms.max(0) as usize / ENERGY_MS;
-        let b = (end_ms.max(0) as usize / ENERGY_MS).max(a + 1);
-        let sum = |frames: &[f32]| -> f32 {
-            frames
-                .get(a.min(frames.len())..b.min(frames.len()))
-                .map_or(0.0, |span| span.iter().sum())
-        };
-        if sum(&self.computer) > sum(&self.mic) {
-            "Remote"
-        } else {
-            "You"
-        }
-    }
-
-    /// Where `speaker` takes over near `around_ms`: the first moment in a
-    /// window around it from which their track stays the louder one for a
-    /// while. Word timestamps from whisper drift by a second or so; the energy
-    /// of the two tracks does not.
-    fn takeover_ms(&self, speaker: &str, around_ms: i64) -> Option<i64> {
-        const HOLD: usize = 200 / ENERGY_MS;
-        const FLOOR: f32 = 1e-3;
-        let (own, other) = if speaker == "You" {
-            (&self.mic, &self.computer)
-        } else {
-            (&self.computer, &self.mic)
-        };
-        let len = own.len().min(other.len());
-        let from = (around_ms - 1500).max(0) as usize / ENERGY_MS;
-        let to = ((around_ms + 1500).max(0) as usize / ENERGY_MS).min(len.saturating_sub(HOLD));
-        (from..to)
-            .find(|&f| {
-                let mine: f32 = own[f..f + HOLD].iter().sum();
-                let theirs: f32 = other[f..f + HOLD].iter().sum();
-                mine > theirs * 2.0 && mine > FLOOR && own[f] > other[f]
-            })
-            .map(|f| (f * ENERGY_MS) as i64)
     }
 }
 
@@ -401,35 +310,88 @@ struct Region {
     end: usize,
 }
 
+const FRAME: usize = WHISPER_RATE * 30 / 1000;
+
+/// Frames of `track` with sound in them: above four times its own noise floor.
+fn active_frames(track: &[f32], frames: usize) -> Vec<bool> {
+    let energies: Vec<f32> = track.chunks(FRAME).map(rms).collect();
+    let mut active = vec![false; frames];
+    if energies.is_empty() {
+        return active;
+    }
+    let mut sorted = energies.clone();
+    sorted.sort_by(f32::total_cmp);
+    let floor = sorted[sorted.len() / 10];
+    let threshold = (floor * 4.0).max(0.002);
+    for (i, energy) in energies.iter().enumerate().take(frames) {
+        if *energy >= threshold {
+            active[i] = true;
+        }
+    }
+    active
+}
+
 /// Finds the parts with sound in them, by frame energy against the noise floor.
 /// Generous padding keeps word edges intact.
 fn speech_regions(tracks: &[&[f32]], len: usize) -> Vec<Region> {
-    const FRAME: usize = WHISPER_RATE * 30 / 1000;
-    const PAD: usize = WHISPER_RATE * 300 / 1000;
-    const MERGE_GAP: usize = WHISPER_RATE * 800 / 1000;
     let frames = len.div_ceil(FRAME);
-    if frames == 0 {
-        return Vec::new();
-    }
     // Each track gets its own threshold: steady sound on one side (music, a
     // fan, a noisy line) must not hide the speech on the other side.
     let mut active = vec![false; frames];
     for track in tracks {
-        let energies: Vec<f32> = track.chunks(FRAME).map(rms).collect();
-        if energies.is_empty() {
-            continue;
-        }
-        let mut sorted = energies.clone();
-        sorted.sort_by(f32::total_cmp);
-        let floor = sorted[sorted.len() / 10];
-        let threshold = (floor * 4.0).max(0.002);
-        for (i, energy) in energies.iter().enumerate().take(frames) {
-            if *energy >= threshold {
-                active[i] = true;
-            }
+        for (a, on) in active.iter_mut().zip(active_frames(track, frames)) {
+            *a |= on;
         }
     }
+    regions_from(&active, len)
+}
 
+/// The parts of the (levelled) mic with your own voice in them. Through
+/// speakers the other side leaks into the mic, delayed a little and always
+/// quieter than on its own track. A mic frame only counts when it is at least
+/// half as loud as the loudest computer audio around it (echo trails behind),
+/// and only in runs of a few frames, so the gaps between their words do not
+/// let the echo through either.
+fn own_speech_regions(mic: &[f32], computer: &[f32]) -> Vec<Region> {
+    const AROUND: usize = 3;
+    const RUN: usize = 3;
+    let frames = mic.len().div_ceil(FRAME);
+    let level = |t: &[f32]| -> Vec<f32> {
+        (0..frames)
+            .map(|i| rms(&t[(i * FRAME).min(t.len())..((i + 1) * FRAME).min(t.len())]))
+            .collect()
+    };
+    let (own, other) = (level(mic), level(computer));
+    let mut active = active_frames(mic, frames);
+    for (i, a) in active.iter_mut().enumerate() {
+        let loudest = other[i.saturating_sub(AROUND)..(i + AROUND + 1).min(frames)]
+            .iter()
+            .fold(0.0f32, |m, v| m.max(*v));
+        if own[i] * 2.0 < loudest {
+            *a = false;
+        }
+    }
+    // Drop runs shorter than RUN frames.
+    let mut i = 0;
+    while i < frames {
+        if !active[i] {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < frames && active[i] {
+            i += 1;
+        }
+        if i - start < RUN {
+            active[start..i].iter_mut().for_each(|a| *a = false);
+        }
+    }
+    regions_from(&active, mic.len())
+}
+
+fn regions_from(active: &[bool], len: usize) -> Vec<Region> {
+    const PAD: usize = WHISPER_RATE * 300 / 1000;
+    const MERGE_GAP: usize = WHISPER_RATE * 800 / 1000;
     let mut regions: Vec<Region> = Vec::new();
     for (i, _) in active.iter().enumerate().filter(|(_, a)| **a) {
         let onset = i * FRAME;
@@ -586,25 +548,136 @@ pub fn transcribe(
         return Ok(empty(language));
     }
 
-    let mixed = mix(mic, computer);
-    let regions = speech_regions(&[mic, computer], mixed.len());
-    if regions.is_empty() {
+    // Each side goes through whisper on its own: whisper follows one voice at
+    // a time, so two people talking at once, or a song under someone, would
+    // otherwise lose the quieter one. The side of a line is then its track.
+    let (mic, computer) = (mix(mic, &[]), mix(computer, &[]));
+    let mic_regions = own_speech_regions(&mic, &computer);
+    let computer_regions = speech_regions(&[&computer], computer.len());
+    if mic_regions.is_empty() && computer_regions.is_empty() {
         emit(events, Event::Progress(1.0));
         return Ok(empty(language));
     }
-    let speakers = Speakers::Tracks(
-        Voices::new(mic, computer),
-        remote_voices(computer, events, abort)?,
-    );
-    whisper_pass(
-        &mixed,
-        &regions,
-        &speakers,
-        language,
+    let remote = remote_voices(&computer, events, abort)?;
+    let context = load_whisper(events, abort)?;
+
+    let length = |regions: &[Region]| regions.iter().map(|r| r.end - r.start).sum::<usize>();
+    let total = (length(&mic_regions) + length(&computer_regions)).max(1) as f64;
+    let mut sides = [
+        (&mic, &mic_regions, Speakers::Side("You", Vec::new())),
+        (
+            &computer,
+            &computer_regions,
+            Speakers::Side("Remote", remote),
+        ),
+    ];
+    // The side with the most sound first: with "auto" its language counts for both.
+    sides.sort_by_key(|(_, regions, _)| std::cmp::Reverse(length(regions)));
+    let mut language = language.to_owned();
+    let mut detected = None;
+    let mut segments = Vec::new();
+    let mut done = 0.0;
+    for (track, regions, speakers) in &sides {
+        if regions.is_empty() {
+            continue;
+        }
+        let share = length(regions) as f64 / total;
+        let (lines, found) = side_pass(
+            &context,
+            track,
+            regions,
+            speakers,
+            &language,
+            (done, done + share),
+            false,
+            events,
+            abort,
+        )?;
+        if language == "auto"
+            && let Some(found) = found
+        {
+            language = found.clone();
+            detected = Some(found);
+        }
+        segments.extend(lines);
+        done += share;
+    }
+    emit(events, Event::Progress(1.0));
+    Ok(Transcript {
+        segments: interleave(segments),
+        language: if language == "auto" {
+            detected.unwrap_or_else(|| "unknown".into())
+        } else {
+            language
+        },
         duration_secs,
-        events,
-        abort,
-    )
+    })
+}
+
+/// The sentences of both sides in the order they were said, joined into
+/// paragraphs per speaker. A sentence of yours that repeats what the other
+/// side said at the same moment is their voice leaking into your mic, and goes.
+fn interleave(mut sentences: Vec<Segment>) -> Vec<Segment> {
+    sentences.sort_by_key(|s| s.start_ms);
+    let words = |text: &str| -> Vec<String> {
+        text.split_whitespace()
+            .map(|w| {
+                w.trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase()
+            })
+            .filter(|w| !w.is_empty())
+            .collect()
+    };
+    let trigrams = |w: &[String]| -> Vec<String> { w.windows(3).map(|t| t.join(" ")).collect() };
+    let is_echo = |mine: &Segment| {
+        let own_words = words(&mine.text);
+        let near: Vec<Vec<String>> = sentences
+            .iter()
+            .filter(|s| {
+                s.speaker != "You"
+                    && s.start_ms < mine.end_ms + 2000
+                    && mine.start_ms < s.end_ms + 2000
+            })
+            .map(|s| words(&s.text))
+            .collect();
+        let own = trigrams(&own_words);
+        if own.is_empty() {
+            // A few words: an echo when they come back word for word.
+            return !own_words.is_empty()
+                && near.iter().any(|theirs| {
+                    theirs
+                        .windows(own_words.len())
+                        .any(|w| w == own_words.as_slice())
+                });
+        }
+        let theirs: std::collections::HashSet<String> =
+            near.iter().flat_map(|w| trigrams(w)).collect();
+        own.iter().filter(|t| theirs.contains(*t)).count() * 2 >= own.len()
+    };
+    let keep: Vec<bool> = sentences
+        .iter()
+        .map(|s| s.speaker != "You" || !is_echo(s))
+        .collect();
+    let mut out: Vec<Segment> = Vec::new();
+    for (sentence, keep) in sentences.into_iter().zip(keep) {
+        if !keep {
+            continue;
+        }
+        match out.last_mut() {
+            Some(last)
+                if last.speaker == sentence.speaker
+                    && (sentence.start_ms - last.end_ms < PARAGRAPH_PAUSE_MS
+                        || !ends_sentence(&last.text))
+                    && sentence.end_ms - last.start_ms < PARAGRAPH_MAX_MS =>
+            {
+                last.text.push(' ');
+                last.text.push_str(&sentence.text);
+                last.end_ms = last.end_ms.max(sentence.end_ms);
+            }
+            _ => out.push(sentence),
+        }
+    }
+    out
 }
 
 /// Who is who on the computer audio of a recording: the turns when more than
@@ -691,8 +764,31 @@ fn whisper_pass(
     events: &Events,
     abort: &Abort,
 ) -> Result<Transcript, String> {
-    let glued = Glued::new(mixed, regions);
+    let context = load_whisper(events, abort)?;
+    let (segments, detected) = side_pass(
+        &context,
+        mixed,
+        regions,
+        speakers,
+        language,
+        (0.0, 1.0),
+        true,
+        events,
+        abort,
+    )?;
+    emit(events, Event::Progress(1.0));
+    Ok(Transcript {
+        segments,
+        language: if language == "auto" {
+            detected.unwrap_or_else(|| "unknown".into())
+        } else {
+            language.to_owned()
+        },
+        duration_secs,
+    })
+}
 
+fn load_whisper(events: &Events, abort: &Abort) -> Result<WhisperContext, String> {
     let model = crate::models::ensure(events, abort)?;
     if abort.load(Ordering::Relaxed) {
         return Err(CANCELLED.into());
@@ -711,23 +807,32 @@ fn whisper_pass(
             ..Default::default()
         });
     }
-    let context = WhisperContext::new_with_params(&model, context_params)
-        .map_err(|e| format!("could not load the model {}: {e}", model.display()))?;
+    WhisperContext::new_with_params(&model, context_params)
+        .map_err(|e| format!("could not load the model {}: {e}", model.display()))
+}
 
+/// Whisper over the stretches of `track` with sound in them, then the lines.
+/// Progress runs from `progress.0` to `progress.1`.
+#[allow(clippy::too_many_arguments)]
+fn side_pass(
+    context: &WhisperContext,
+    track: &[f32],
+    regions: &[Region],
+    speakers: &Speakers,
+    language: &str,
+    progress: (f64, f64),
+    paragraphs: bool,
+    events: &Events,
+    abort: &Abort,
+) -> Result<(Vec<Segment>, Option<String>), String> {
+    let glued = Glued::new(track, regions);
     emit(events, Event::Stage("Transcribing".into()));
-    let (words, detected) = run_whisper(&context, &glued, speakers, language, events, abort)?;
-    emit(events, Event::Progress(1.0));
-
-    let segments = phrases(&words, &glued, speakers, mixed);
-    Ok(Transcript {
-        segments,
-        language: if language == "auto" {
-            detected.unwrap_or_else(|| "unknown".into())
-        } else {
-            language.to_owned()
-        },
-        duration_secs,
-    })
+    let (words, detected) =
+        run_whisper(context, &glued, speakers, language, progress, events, abort)?;
+    Ok((
+        phrases(&words, &glued, speakers, track, paragraphs),
+        detected,
+    ))
 }
 
 /// A word with its times in the glued buffer, and how sure whisper was that
@@ -746,6 +851,7 @@ fn run_whisper(
     glued: &Glued,
     speakers: &Speakers,
     language: &str,
+    progress: (f64, f64),
     events: &Events,
     abort: &Abort,
 ) -> Result<(Vec<Word>, Option<String>), String> {
@@ -767,9 +873,10 @@ fn run_whisper(
 
     let progress_events = events.clone();
     params.set_progress_callback_safe(move |pct: i32| {
+        let pct = f64::from(pct.clamp(0, 100)) / 100.0;
         emit(
             &progress_events,
-            Event::Progress(f64::from(pct.clamp(0, 100)) / 100.0),
+            Event::Progress(progress.0 + (progress.1 - progress.0) * pct),
         );
     });
 
@@ -866,7 +973,13 @@ const PARAGRAPH_MAX_MS: i64 = 90_000;
 /// Groups the words into the lines of the transcript: a new line where the
 /// speaker changes, where a sentence ends on another speaker, and at every
 /// stretch of silence. Timestamps are put back on the real timeline.
-fn phrases(words: &[Word], glued: &Glued, speakers: &Speakers, mixed: &[f32]) -> Vec<Segment> {
+fn phrases(
+    words: &[Word],
+    glued: &Glued,
+    speakers: &Speakers,
+    mixed: &[f32],
+    paragraphs: bool,
+) -> Vec<Segment> {
     struct Phrase {
         words: Vec<String>,
         start_ms: i64,
@@ -980,7 +1093,8 @@ fn phrases(words: &[Word], glued: &Glued, speakers: &Speakers, mixed: &[f32]) ->
         // together, a long pause or a very long turn starts a new paragraph.
         match segments.last_mut() {
             Some(last)
-                if last.speaker == speaker
+                if paragraphs
+                    && last.speaker == speaker
                     && (piece.start_ms - last.end_ms < PARAGRAPH_PAUSE_MS
                         || !ends_sentence(&last.text))
                     && piece.end_ms - last.start_ms < PARAGRAPH_MAX_MS =>
@@ -1245,4 +1359,54 @@ fn usage() -> glib::ExitCode {
         "       {APP_NAME} transcribe-file <audio> [--speakers N] [--language auto|en|nl|...] [--model name]"
     );
     glib::ExitCode::from(2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(start_ms: i64, speaker: &str, text: &str) -> Segment {
+        Segment {
+            start_ms,
+            end_ms: start_ms + 2000,
+            speaker: speaker.into(),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn both_sides_come_back_in_the_order_they_spoke() {
+        let out = interleave(vec![
+            line(0, "Remote", "Thanks, I can start with the release."),
+            line(5000, "Remote", "So the beta went out on Monday."),
+            line(2500, "You", "Sure, go ahead."),
+        ]);
+        let order: Vec<&str> = out.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "Thanks, I can start with the release.",
+                "Sure, go ahead.",
+                "So the beta went out on Monday."
+            ]
+        );
+    }
+
+    #[test]
+    fn the_other_side_leaking_into_the_mic_is_dropped() {
+        let out = interleave(vec![
+            line(0, "Remote 1", "The review is still pending after four days."),
+            line(300, "You", "review is still pending after four"),
+            line(9000, "Remote 1", "Sounds good."),
+            line(9100, "You", "Sounds good."),
+            // The same words much later are yours.
+            line(30_000, "You", "The review is still pending, I see."),
+        ]);
+        let yours: Vec<&str> = out
+            .iter()
+            .filter(|s| s.speaker == "You")
+            .map(|s| s.text.as_str())
+            .collect();
+        assert_eq!(yours, ["The review is still pending, I see."]);
+    }
 }
