@@ -1,0 +1,2 @@
+[env]
+GGML_NATIVE = "OFF"
