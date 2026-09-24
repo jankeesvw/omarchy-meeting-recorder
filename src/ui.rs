@@ -1770,6 +1770,29 @@ impl Recorder {
                     }
                 }
                 manifest.speakers = names;
+            } else {
+                // Several voices on the computer audio come out as Remote 1,
+                // Remote 2, ...: one name each, after your own.
+                let remotes = speakers_in(&markdown)
+                    .iter()
+                    .filter_map(|s| s.strip_prefix("Remote ")?.parse::<usize>().ok())
+                    .max()
+                    .unwrap_or(0);
+                if remotes > 1 {
+                    let mut names = manifest.speakers.clone();
+                    if names.len() <= 2 {
+                        names.truncate(1);
+                    }
+                    while names.len() < remotes + 1 {
+                        let n = names.len();
+                        names.push(format!("Remote {n}"));
+                    }
+                    names.truncate(remotes + 1);
+                    manifest.speakers = names;
+                } else if manifest.speakers.len() > 2 {
+                    manifest.speakers.truncate(2);
+                    manifest.speakers[1] = meeting::DEFAULT_REMOTE.to_owned();
+                }
             }
             // The transcription labels speakers You/Remote or Speaker N; use
             // the names of this meeting.
@@ -2525,6 +2548,9 @@ impl Recorder {
         for (i, name) in manifest.speakers.iter().enumerate() {
             let title = match (manifest.imported.is_some(), i) {
                 (false, 0) => "Speaker on the microphone".to_owned(),
+                (false, _) if manifest.speakers.len() > 2 => {
+                    format!("Speaker {i} on the computer audio")
+                }
                 (false, _) => "Speaker on the computer audio".to_owned(),
                 (true, _) => format!("Speaker {}", i + 1),
             };

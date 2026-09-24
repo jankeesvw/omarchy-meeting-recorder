@@ -104,11 +104,17 @@ impl Manifest {
 
 impl Manifest {
     /// The labels the transcription gives the speakers, in the order of
-    /// `speakers`: You and Remote for a recording, Speaker N for an import.
+    /// `speakers`: You and Remote (or Remote 1, Remote 2, ... when the computer
+    /// audio holds several voices) for a recording, Speaker N for an import.
     pub fn default_labels(&self) -> Vec<String> {
         if self.imported.is_some() {
             (1..=self.speakers.len().max(1))
                 .map(|i| format!("Speaker {i}"))
+                .collect()
+        } else if self.speakers.len() > 2 {
+            // Several voices on the computer audio: Remote 1, Remote 2, ...
+            std::iter::once(DEFAULT_YOU.to_owned())
+                .chain((1..self.speakers.len()).map(|i| format!("{DEFAULT_REMOTE} {i}")))
                 .collect()
         } else {
             vec![DEFAULT_YOU.to_owned(), DEFAULT_REMOTE.to_owned()]

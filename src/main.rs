@@ -12,6 +12,7 @@ mod export;
 mod ipc;
 mod meeting;
 mod models;
+mod nemotron;
 mod player;
 mod settings;
 mod theme;
@@ -41,6 +42,7 @@ fn main() -> glib::ExitCode {
         Some("transcribe-file") => {
             transcribe::cli_file(&std::env::args().skip(2).collect::<Vec<_>>())
         }
+        Some("diarize") => diarize::cli(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("transcribe") => transcribe::cli(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("ask") => agent::cli(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("-h" | "--help") => {

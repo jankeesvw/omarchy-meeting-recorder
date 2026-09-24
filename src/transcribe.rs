@@ -263,14 +263,22 @@ struct Voices {
 /// voices of a single imported file.
 #[derive(Clone)]
 enum Speakers {
-    Tracks(Voices),
+    /// The two tracks of a recording, and who is who on the computer audio
+    /// when more than one voice is heard there.
+    Tracks(Voices, Vec<crate::diarize::Turn>),
     Turns(Vec<crate::diarize::Turn>),
 }
 
 impl Speakers {
     fn speaker(&self, start_ms: i64, end_ms: i64) -> String {
         match self {
-            Speakers::Tracks(voices) => voices.speaker(start_ms, end_ms).to_owned(),
+            Speakers::Tracks(voices, remote) => match voices.speaker(start_ms, end_ms) {
+                "Remote" if !remote.is_empty() => format!(
+                    "Remote {}",
+                    crate::diarize::speaker_at(remote, start_ms, end_ms) + 1
+                ),
+                side => side.to_owned(),
+            },
             Speakers::Turns(turns) => {
                 format!(
                     "Speaker {}",
@@ -284,7 +292,16 @@ impl Speakers {
     /// more precisely than whisper's word times.
     fn takeover_ms(&self, speaker: &str, around_ms: i64) -> Option<i64> {
         match self {
-            Speakers::Tracks(voices) => voices.takeover_ms(speaker, around_ms),
+            Speakers::Tracks(voices, remote) => {
+                let index = speaker
+                    .strip_prefix("Remote ")
+                    .and_then(|n| n.parse::<usize>().ok());
+                match index {
+                    Some(index) => crate::diarize::turn_start_near(remote, index - 1, around_ms)
+                        .or_else(|| voices.takeover_ms("Remote", around_ms)),
+                    None => voices.takeover_ms(speaker, around_ms),
+                }
+            }
             Speakers::Turns(turns) => {
                 let index = speaker.strip_prefix("Speaker ")?.parse::<usize>().ok()?;
                 crate::diarize::turn_start_near(turns, index.checked_sub(1)?, around_ms)
@@ -575,7 +592,10 @@ pub fn transcribe(
         emit(events, Event::Progress(1.0));
         return Ok(empty(language));
     }
-    let speakers = Speakers::Tracks(Voices::new(mic, computer));
+    let speakers = Speakers::Tracks(
+        Voices::new(mic, computer),
+        remote_voices(computer, events, abort)?,
+    );
     whisper_pass(
         &mixed,
         &regions,
@@ -585,6 +605,32 @@ pub fn transcribe(
         events,
         abort,
     )
+}
+
+/// Who is who on the computer audio of a recording: the turns when more than
+/// one voice is heard there, nothing when it is one person (then they are
+/// simply Remote). A missing speaker model is no reason to fail the
+/// transcript; the other side then stays one speaker.
+fn remote_voices(
+    computer: &[f32],
+    events: &Events,
+    abort: &Abort,
+) -> Result<Vec<crate::diarize::Turn>, String> {
+    if is_silent(computer) {
+        return Ok(Vec::new());
+    }
+    match crate::diarize::turns(computer, None, events, abort) {
+        Ok(turns) if turns.iter().any(|t| t.speaker > 0) => Ok(turns),
+        Ok(_) => Ok(Vec::new()),
+        Err(e) if e == CANCELLED => Err(e),
+        Err(e) => {
+            eprintln!(
+                "{}: finding the voices on the computer audio: {e}",
+                crate::APP_NAME
+            );
+            Ok(Vec::new())
+        }
+    }
 }
 
 /// Transcribes one imported audio file (16 kHz mono) and tells the voices in

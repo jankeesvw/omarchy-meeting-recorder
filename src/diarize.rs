@@ -2,31 +2,25 @@
 //!
 //! A recording made by the app has two tracks, so the speaker of every line
 //! follows from which track is louder. An imported file has one, so the voices
-//! themselves have to be told apart. That is sherpa-onnx's offline speaker
-//! diarization, run locally: pyannote's segmentation model finds stretches with
-//! one voice in them, a speaker embedding model (WeSpeaker ResNet34, trained on
-//! VoxCeleb) turns each stretch into a voice print, and the prints are clustered
-//! into speakers. Both models are downloaded on first use, about 32 MB together.
+//! themselves have to be told apart. That is NVIDIA's Nemotron 3 Diarization
+//! (see `nemotron.rs`), run locally: it follows up to eight speakers, also when
+//! they talk at the same time.
 
-use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::path::PathBuf;
 
-use std::ffi::{CString, c_void};
+use crate::transcribe::{Abort, Event, Events, WHISPER_RATE, models_dir};
 
-use sherpa_rs_sys as sys;
+/// Where the exported model lives: `frontend.onnx`, the step graph and
+/// `nemotron.json`.
+fn model_dir() -> PathBuf {
+    models_dir().join("nemotron-3-diarization")
+}
 
-use crate::transcribe::{Abort, CANCELLED, Event, Events, WHISPER_RATE, download, models_dir};
-
-const SEGMENTATION_FILE: &str = "pyannote-segmentation-3.0.onnx";
-const SEGMENTATION_URL: &str = "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx";
-const SEGMENTATION_MIN_BYTES: u64 = 5_000_000;
-const EMBEDDING_FILE: &str = "wespeaker_en_voxceleb_resnet34_LM.onnx";
-const EMBEDDING_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx";
-const EMBEDDING_MIN_BYTES: u64 = 20_000_000;
-
-/// Cosine distance under which two stretches are the same voice, when the
-/// number of speakers is left to the clustering.
-const THRESHOLD: f32 = 0.6;
+/// The step graph: int8 by default (101 MB), `NEMOTRON_STEP=step.onnx` for
+/// the full-precision export (396 MB).
+fn step_file() -> String {
+    std::env::var("NEMOTRON_STEP").unwrap_or_else(|_| "step-int8.onnx".into())
+}
 
 /// A stretch of one speaker. `speaker` counts from 0 in the order the voices
 /// are first heard.
@@ -37,188 +31,74 @@ pub struct Turn {
     pub speaker: usize,
 }
 
-fn model(
-    file: &str,
-    url: &str,
-    min_bytes: u64,
-    events: &Events,
-    abort: &Abort,
-) -> Result<PathBuf, String> {
-    let path = models_dir().join(file);
-    if std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() >= min_bytes) {
-        return Ok(path);
-    }
-    download(
-        url,
-        &path,
-        "Downloading speaker models",
-        min_bytes,
-        events,
-        abort,
-    )?;
-    Ok(path)
-}
-
 /// Finds the speakers in `samples` (16 kHz mono). `speakers` fixes how many
-/// there are; `None` lets the clustering decide.
+/// there are; `None` lets the model decide.
 pub fn turns(
     samples: &[f32],
     speakers: Option<usize>,
     events: &Events,
     abort: &Abort,
 ) -> Result<Vec<Turn>, String> {
-    let segmentation = model(
-        SEGMENTATION_FILE,
-        SEGMENTATION_URL,
-        SEGMENTATION_MIN_BYTES,
-        events,
-        abort,
-    )?;
-    let embedding = model(
-        EMBEDDING_FILE,
-        EMBEDDING_URL,
-        EMBEDDING_MIN_BYTES,
-        events,
-        abort,
-    )?;
-    if abort.load(Ordering::Relaxed) {
-        return Err(CANCELLED.into());
-    }
+    let dir = model_dir();
     let _ = events.send_blocking(Event::Stage("Finding speakers".into()));
     let _ = events.send_blocking(Event::Progress(0.0));
-    run(&segmentation, &embedding, samples, speakers, events, abort)
-}
-
-fn run(
-    segmentation: &Path,
-    embedding: &Path,
-    samples: &[f32],
-    speakers: Option<usize>,
-    events: &Events,
-    abort: &Abort,
-) -> Result<Vec<Turn>, String> {
-    let raw = diarize(
-        segmentation,
-        embedding,
-        samples,
-        speakers.map_or(-1, |n| n as i32),
-        THRESHOLD,
-        events,
-        abort,
-    )?;
-    // With the count left open, voices heard for only a few seconds are almost
-    // always one of the others on a bad moment (a cough, a laugh, crosstalk).
-    let raw = if speakers.is_none() {
-        absorb_small_clusters(raw)
-    } else {
-        raw
+    let mut model = crate::nemotron::Model::load(&dir, &step_file())
+        .map_err(|e| format!("{e} (the speaker model is expected in {})", dir.display()))?;
+    let probs = model.probabilities(samples, events, abort)?;
+    let raw = segments(&probs, 8);
+    let raw = match speakers {
+        Some(n) => keep_largest(raw, n),
+        // Voices heard for only a few seconds are almost always one of the
+        // others on a bad moment (a cough, a laugh, crosstalk).
+        None => absorb_small_clusters(raw),
     };
     Ok(renumber(raw))
 }
 
-/// What the progress callback gets to see.
-struct Progress<'a> {
-    events: &'a Events,
-    abort: &'a Abort,
-}
-
-unsafe extern "C" fn on_progress(done: i32, total: i32, arg: *mut c_void) -> i32 {
-    // SAFETY: `arg` is the `Progress` that `diarize` keeps alive for the call.
-    let progress = unsafe { &*(arg as *const Progress) };
-    if total > 0 {
-        let _ = progress
-            .events
-            .send_blocking(Event::Progress(f64::from(done) / f64::from(total)));
-    }
-    // A non-zero return asks sherpa-onnx to stop.
-    i32::from(progress.abort.load(Ordering::Relaxed))
-}
-
-/// sherpa-onnx's offline diarization, through its C API directly: the Rust
-/// wrapper fixes both models at one thread, several times slower on long files.
-fn diarize(
-    segmentation: &Path,
-    embedding: &Path,
-    samples: &[f32],
-    clusters: i32,
-    threshold: f32,
-    events: &Events,
-    abort: &Abort,
-) -> Result<Vec<(i64, i64, i32)>, String> {
-    let path = |p: &Path| CString::new(p.to_string_lossy().as_bytes()).map_err(|e| e.to_string());
-    let (segmentation, embedding) = (path(segmentation)?, path(embedding)?);
-    let provider = CString::new("cpu").expect("no nul byte");
-    let threads = std::thread::available_parallelism()
-        .map_or(4, |n| n.get())
-        .min(8) as i32;
-    let config = sys::SherpaOnnxOfflineSpeakerDiarizationConfig {
-        segmentation: sys::SherpaOnnxOfflineSpeakerSegmentationModelConfig {
-            pyannote: sys::SherpaOnnxOfflineSpeakerSegmentationPyannoteModelConfig {
-                model: segmentation.as_ptr(),
-            },
-            num_threads: threads,
-            debug: 0,
-            provider: provider.as_ptr(),
-        },
-        embedding: sys::SherpaOnnxSpeakerEmbeddingExtractorConfig {
-            model: embedding.as_ptr(),
-            num_threads: threads,
-            debug: 0,
-            provider: provider.as_ptr(),
-        },
-        // A positive count fixes the number of speakers; otherwise the
-        // threshold decides.
-        clustering: sys::SherpaOnnxFastClusteringConfig {
-            num_clusters: clusters,
-            threshold,
-        },
-        // Ignore blips shorter than this, and bridge pauses shorter than this.
-        min_duration_on: 0.3,
-        min_duration_off: 0.5,
-    };
-    // SAFETY: the config and the strings it points to outlive the call.
-    let sd = unsafe { sys::SherpaOnnxCreateOfflineSpeakerDiarization(&config) };
-    if sd.is_null() {
-        return Err("could not load the speaker models".into());
-    }
-    let progress = Progress { events, abort };
-    // SAFETY: `sd` is valid, `samples` lives through the call, and `progress`
-    // is what `on_progress` casts its argument back to.
-    let result = unsafe {
-        sys::SherpaOnnxOfflineSpeakerDiarizationProcessWithCallback(
-            sd,
-            samples.as_ptr(),
-            samples.len() as i32,
-            Some(on_progress),
-            &progress as *const Progress as *mut c_void,
-        )
-    };
+/// Stretches where a speaker's probability is over one half, in ms. A frame
+/// is 10 ms; pauses under half a second within one speaker are bridged and
+/// blips under 0.3 seconds dropped, as the old diarization did.
+fn segments(probs: &[f32], speakers: usize) -> Vec<(i64, i64, i32)> {
+    let frames = probs.len() / speakers;
     let mut raw = Vec::new();
-    if !result.is_null() {
-        // SAFETY: `result` is a valid result; the segments array has `count`
-        // entries and is freed below, after it has been copied.
-        unsafe {
-            let count = sys::SherpaOnnxOfflineSpeakerDiarizationResultGetNumSegments(result);
-            let segments = sys::SherpaOnnxOfflineSpeakerDiarizationResultSortByStartTime(result);
-            if !segments.is_null() && count > 0 {
-                for s in std::slice::from_raw_parts(segments, count as usize) {
-                    raw.push((
-                        (f64::from(s.start) * 1000.0) as i64,
-                        (f64::from(s.end) * 1000.0) as i64,
-                        s.speaker,
-                    ));
+    for s in 0..speakers {
+        let mut runs: Vec<(i64, i64)> = Vec::new();
+        let mut start = None;
+        for f in 0..=frames {
+            let on = f < frames && probs[f * speakers + s] > 0.5;
+            match (on, start) {
+                (true, None) => start = Some(f),
+                (false, Some(from)) => {
+                    let (from, to) = (from as i64 * 10, f as i64 * 10);
+                    match runs.last_mut() {
+                        Some(last) if from - last.1 < 500 => last.1 = to,
+                        _ => runs.push((from, to)),
+                    }
+                    start = None;
                 }
-                sys::SherpaOnnxOfflineSpeakerDiarizationDestroySegment(segments);
+                _ => {}
             }
-            sys::SherpaOnnxOfflineSpeakerDiarizationDestroyResult(result);
         }
+        raw.extend(
+            runs.into_iter()
+                .filter(|(from, to)| to - from >= 300)
+                .map(|(from, to)| (from, to, s as i32)),
+        );
     }
-    // SAFETY: created above and not used after this.
-    unsafe { sys::SherpaOnnxDestroyOfflineSpeakerDiarization(sd) };
-    if abort.load(Ordering::Relaxed) {
-        return Err(CANCELLED.into());
+    raw
+}
+
+/// Keeps the `n` speakers with the most speech; the turns of the others go to
+/// the nearest kept speaker.
+fn keep_largest(raw: Vec<(i64, i64, i32)>, n: usize) -> Vec<(i64, i64, i32)> {
+    let mut spoken = std::collections::HashMap::<i32, i64>::new();
+    for (start, end, id) in &raw {
+        *spoken.entry(*id).or_default() += end - start;
     }
-    Ok(raw)
+    let mut ranked: Vec<(i32, i64)> = spoken.into_iter().collect();
+    ranked.sort_by_key(|(id, ms)| (-ms, *id));
+    let kept: Vec<i32> = ranked.iter().take(n.max(1)).map(|(id, _)| *id).collect();
+    reassign(raw, |id| kept.contains(id))
 }
 
 /// Gives every cluster with little speech (under 4 seconds, or under 4% of
@@ -230,12 +110,17 @@ fn absorb_small_clusters(raw: Vec<(i64, i64, i32)>) -> Vec<(i64, i64, i32)> {
     }
     let total: i64 = spoken.values().sum();
     let floor = (total * 4 / 100).max(4000);
-    let keeps = |id: &i32| spoken.get(id).is_some_and(|ms| *ms >= floor);
-    if spoken.keys().filter(|id| keeps(id)).count() == 0 {
-        return raw;
-    }
+    reassign(raw, |id| spoken.get(id).is_some_and(|ms| *ms >= floor))
+}
+
+/// Moves the turns of every speaker that `keeps` rejects to the speaker of
+/// the nearest kept turn.
+fn reassign(raw: Vec<(i64, i64, i32)>, keeps: impl Fn(&i32) -> bool) -> Vec<(i64, i64, i32)> {
     let anchors: Vec<(i64, i64, i32)> =
         raw.iter().copied().filter(|(_, _, id)| keeps(id)).collect();
+    if anchors.is_empty() {
+        return raw;
+    }
     raw.iter()
         .map(|&(start, end, id)| {
             if keeps(&id) {
@@ -322,6 +207,56 @@ pub fn turn_start_near(turns: &[Turn], speaker: usize, around_ms: i64) -> Option
         .filter(|t| t.speaker == speaker && (t.start_ms - around_ms).abs() <= 1500)
         .min_by_key(|t| (t.start_ms - around_ms).abs())
         .map(|t| t.start_ms)
+}
+
+/// `diarize <audio> [--speakers N]`: prints the speaker turns as JSON, for
+/// comparing diarization engines on the same file.
+pub fn cli(args: &[String]) -> gtk::glib::ExitCode {
+    let mut path = None;
+    let mut speakers = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--speakers" | "-s" => speakers = iter.next().and_then(|n| n.parse::<usize>().ok()),
+            other => path = Some(PathBuf::from(other)),
+        }
+    }
+    let Some(path) = path else {
+        eprintln!("Usage: {} diarize <audio> [--speakers N]", crate::APP_NAME);
+        return gtk::glib::ExitCode::from(2);
+    };
+    let result = crate::transcribe::load_track(&path).and_then(|samples| {
+        let (events, _rx) = async_channel::unbounded();
+        let started = std::time::Instant::now();
+        let turns = turns(&samples, speakers, &events, &Abort::default())?;
+        eprintln!(
+            "{} turns in {:.1}s for {}s of audio",
+            turns.len(),
+            started.elapsed().as_secs_f64(),
+            samples.len() / WHISPER_RATE
+        );
+        Ok(turns)
+    });
+    match result {
+        Ok(turns) => {
+            let json: Vec<serde_json::Value> = turns
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "speaker": t.speaker,
+                        "start": t.start_ms as f64 / 1000.0,
+                        "end": t.end_ms as f64 / 1000.0,
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::Value::Array(json));
+            gtk::glib::ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("{}: {message}", crate::APP_NAME);
+            gtk::glib::ExitCode::FAILURE
+        }
+    }
 }
 
 #[cfg(test)]
