@@ -40,6 +40,10 @@ Your microphone and whatever your computer plays are recorded as two separate tr
 
 **Pause** freezes both waves under a "❚❚ PAUSED" sign and stops the clock; nothing is written to either track until you press **Resume**.
 
+### Shows a preview while you talk
+
+**Live captions**, off by default, turns on a line or two of preview text under the meters as you record: switch it on in the group above the meters, before or during the call. It is a preview only, a few seconds behind and without a speaker attached, so pauses stop it and it never touches the real transcript, which is still made from the full recording, the normal way, once you stop. It needs the speech model already on disk, so if it is not there yet, captions say so instead of quietly starting a download.
+
 ### Stays out of the way
 
 Press Ctrl+M, or the button in the header bar, and the window shrinks to a strip with only the clock and the two waves. Drag the strip anywhere; the small button on its right, or Ctrl+M again, brings the full window back.
