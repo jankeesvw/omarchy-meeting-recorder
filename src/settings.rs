@@ -84,3 +84,11 @@ pub fn bar_widget_offered() -> bool {
 pub fn set_bar_widget_offered() {
     save("bar_widget_offered", "yes");
 }
+
+/// The user's own additions to the mishearing vocabulary: `{"Term": ["heard
+/// as", ...]}`, merged onto the built-in list. Absent or malformed, this is
+/// just an empty object; `vocabulary::Corrector` ignores malformed entries
+/// inside it rather than giving up on the whole setting.
+pub fn load_vocabulary() -> serde_json::Value {
+    load()["vocabulary"].clone()
+}

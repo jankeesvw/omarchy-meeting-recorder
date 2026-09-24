@@ -80,6 +80,20 @@ Hover a line and three buttons appear: edit the text in place, give the line to 
 
 ![Editing a line in place](screenshots/inline-edit.webp)
 
+### Corrects the words it reliably mishears
+
+whisper hears "Omarchi", "Way bar" and "Github" a lot, so those and a couple hundred other Linux and dev terms are rewritten to what was actually meant, right after the transcript comes back. Matching is whole words only, case-insensitive, and never inside a domain, a path or a hyphenated word, so `omarchi.example.com` and `/usr/omarchi` are left alone. This is deliberately not done with whisper's initial prompt: a prompt only reaches the decoder through its text context, and text context is what makes whisper loop.
+
+Add your own terms in `vocabulary`, in `~/.local/state/omarchy-meeting-recorder/settings.json` next to the audio format and the language: a term mapped to the ways it comes out for you.
+
+```json
+{
+  "vocabulary": {
+    "Jankeesvw": ["Yankee's view", "Jankie's view"]
+  }
+}
+```
+
 ### Chapters by your default agent
 
 When Omarchy has a default coding agent set (`omarchy default agent`, for instance Claude Code or Codex) and the meeting is three minutes or longer, the agent divides the transcript into chapters once it is done. They show up as a list on the left, as headings in the transcript and as markers on the waveform (hover for the title), and `transcript.md` gets a `## Chapters` list at the top, so a copied transcript carries them too. The Chapters header on the done page makes them again.

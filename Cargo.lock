@@ -787,6 +787,7 @@ dependencies = [
  "gtk4",
  "libadwaita",
  "libc",
+ "regex",
  "serde_json",
  "sherpa-rs-sys",
  "ureq",

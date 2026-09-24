@@ -739,6 +739,7 @@ fn run_whisper(
         let (start, _) = locate(&map, data.start_timestamp * 10);
         let (end, _) = locate(&map, data.end_timestamp * 10);
         let speaker = live_speakers.speaker(start, end);
+        let text = crate::vocabulary::correct(text);
         emit(
             &segment_events,
             Event::Segment(format!("{speaker}: {text}")),
@@ -919,6 +920,9 @@ fn phrases(words: &[Word], glued: &Glued, speakers: &Speakers, mixed: &[f32]) ->
         if is_noise_marker(&text) || is_hallucination(&text, &piece, whole, mixed) {
             continue;
         }
+        // Fixed up after decoding, once whisper's own filters have had their
+        // say on the unaltered words.
+        let text = crate::vocabulary::correct(&text);
         // The whole piece goes to the speaker it overlaps most.
         let speaker = speakers.speaker(piece.start_ms, piece.end_ms);
         // A new speaker starts where their voice takes over, not where whisper

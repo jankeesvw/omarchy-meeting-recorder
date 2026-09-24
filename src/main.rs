@@ -17,6 +17,7 @@ mod settings;
 mod theme;
 mod transcribe;
 mod ui;
+mod vocabulary;
 
 use gtk::glib;
 
