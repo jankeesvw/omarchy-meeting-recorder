@@ -50,6 +50,8 @@ The bar widget shows the same while you record: a pulsing dot, a small waveform 
 
 <p align="center"><img src="screenshots/bar-widget.webp" alt="The bar widget recording, paused and transcribing" width="600"></p>
 
+If you switch away while it transcribes, a notification tells you when the transcript is ready (or if it failed), and clicking it brings the window back.
+
 ### Transcribes on your own machine
 
 When you stop, the window switches straight to the transcribing animation: it saves the audio, then [whisper-rs](https://github.com/tazz4843/whisper-rs) transcribes the meeting, and the lines type themselves out with the speakers' names as they are recognised. It ends on 100% and DONE, and stays at least ten seconds, also for a short recording. Nothing is sent anywhere.

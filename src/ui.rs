@@ -568,6 +568,9 @@ impl Recorder {
         window.add_action(&compact_action);
         let quit_action = gio::SimpleAction::new("quit", None);
         app.add_action(&quit_action);
+        // The default action of the "transcript ready" notification.
+        let present_action = gio::SimpleAction::new("present", None);
+        app.add_action(&present_action);
 
         let recorder = Rc::new(Recorder {
             window,
@@ -636,7 +639,7 @@ impl Recorder {
             loading: Cell::new(false),
             manifest: RefCell::default(),
         });
-        recorder.connect_signals(&open_button, &new_button, &quit_action);
+        recorder.connect_signals(&open_button, &new_button, &quit_action, &present_action);
         let weak = Rc::downgrade(&recorder);
         glib::spawn_future_local(async move {
             while let Ok(command) = commands_rx.recv().await {
@@ -665,6 +668,7 @@ impl Recorder {
         open_button: &gtk::Button,
         new_button: &gtk::Button,
         quit_action: &gio::SimpleAction,
+        present_action: &gio::SimpleAction,
     ) {
         let weak = Rc::downgrade(self);
         self.button.connect_clicked(move |_| {
@@ -775,6 +779,14 @@ impl Recorder {
         quit_action.connect_activate(move |_, _| {
             if let Some(r) = weak.upgrade() {
                 r.window.close();
+            }
+        });
+
+        // Clicking the "transcript ready" notification brings the window back.
+        let weak = Rc::downgrade(self);
+        present_action.connect_activate(move |_, _| {
+            if let Some(r) = weak.upgrade() {
+                r.window.present();
             }
         });
 
@@ -1833,8 +1845,15 @@ impl Recorder {
         }
         self.show_transcript(text.as_deref(), problem.as_deref());
         self.transcript_scroll.vadjustment().set_value(0.0);
+        // Cancelling took a click in this window, so whoever did it is
+        // already looking at it; only a result nobody asked for gets a
+        // notification.
+        let cancelled = matches!(&transcript, Err(message) if message == CANCELLED);
         if let Some(problem) = problem {
             eprintln!("{APP_NAME}: {problem}");
+            if !cancelled && !self.window.is_active() {
+                self.notify("Transcription failed", &self.title());
+            }
         } else {
             self.window.set_default_widget(Some(&self.copy_button));
             self.copy_button.grab_focus();
@@ -1842,12 +1861,30 @@ impl Recorder {
             if self.can_have_chapters() {
                 self.generate_chapters();
             }
+            if !self.window.is_active() {
+                self.notify("Transcript ready", &self.title());
+            }
         }
         if self.quit_when_done.get()
             && let Some(app) = self.window.application()
         {
             app.quit();
         }
+    }
+
+    /// Tells the desktop a transcript is ready, or failed, so switching back
+    /// to check on it is not the only way to find out. Its default action
+    /// presents the window again.
+    fn notify(&self, title: &str, body: &str) {
+        let Some(app) = self.window.application() else {
+            return;
+        };
+        let note = gio::Notification::new(title);
+        note.set_body(Some(body));
+        note.set_default_action("app.present");
+        // One id, so a second meeting replaces the notification of the last
+        // rather than piling up.
+        app.send_notification(Some("transcript"), &note);
     }
 
     /// Shows a saved meeting on the done page, with the settings it was made with.
@@ -3262,3 +3299,4 @@ fn meter_block(name: &str, meter: &gtk::DrawingArea) -> gtk::Box {
     );
     block
 }
+
