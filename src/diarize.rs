@@ -8,19 +8,7 @@
 
 use std::path::PathBuf;
 
-use crate::transcribe::{Abort, Event, Events, WHISPER_RATE, models_dir};
-
-/// Where the exported model lives: `frontend.onnx`, the step graph and
-/// `nemotron.json`.
-fn model_dir() -> PathBuf {
-    models_dir().join("nemotron-3-diarization")
-}
-
-/// The step graph: int8 by default (101 MB), `NEMOTRON_STEP=step.onnx` for
-/// the full-precision export (396 MB).
-fn step_file() -> String {
-    std::env::var("NEMOTRON_STEP").unwrap_or_else(|_| "step-int8.onnx".into())
-}
+use crate::transcribe::{Abort, Event, Events, WHISPER_RATE};
 
 /// A stretch of one speaker. `speaker` counts from 0 in the order the voices
 /// are first heard.
@@ -39,11 +27,10 @@ pub fn turns(
     events: &Events,
     abort: &Abort,
 ) -> Result<Vec<Turn>, String> {
-    let dir = model_dir();
+    let path = crate::nemotron::ensure(events, abort)?;
     let _ = events.send_blocking(Event::Stage("Finding speakers".into()));
     let _ = events.send_blocking(Event::Progress(0.0));
-    let mut model = crate::nemotron::Model::load(&dir, &step_file())
-        .map_err(|e| format!("{e} (the speaker model is expected in {})", dir.display()))?;
+    let mut model = crate::nemotron::Model::load(&path)?;
     let probs = model.probabilities(samples, events, abort)?;
     let raw = segments(&probs, 8);
     let raw = match speakers {

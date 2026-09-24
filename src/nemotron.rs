@@ -4,33 +4,39 @@
 //! audio together with a small memory of earlier frames (the speaker cache and
 //! a FIFO of the latest ones), and gives every 10 ms frame a probability for
 //! each of up to eight speakers, numbered in the order they are first heard.
-//! The network itself is stateless and exported as two ONNX graphs; the chunk
-//! loop and the cache policy below follow `Nemotron3DiarizationSpeakerCache` in
-//! Hugging Face transformers step by step.
 //!
-//! - `frontend.onnx`: power spectrum -> log-mel -> stacked encoder input
-//! - `step.onnx`: encoder input of one step -> speaker logits per 10 ms frame
-//! - `nemotron.json`: the cache sizes and the learned silence embedding
+//! The network is the int8 ONNX export from the Hugging Face ONNX community,
+//! which holds no state: it takes the log-mel features of one chunk and the
+//! cached frames, and returns the logits and the chunk's frames for the cache.
+//! The features, the chunk loop and the cache policy are here, and follow
+//! `Nemotron3DiarizationSpeakerCache` in Hugging Face transformers step by step.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use ort::session::Session;
 use ort::value::Tensor;
 use realfft::RealFftPlanner;
 
-use crate::transcribe::{Abort, CANCELLED, Event, Events};
+use crate::transcribe::{Abort, CANCELLED, Event, Events, download, models_dir};
+
+/// A fixed revision, so a later change upstream never reaches the app unseen.
+const REPO: &str = "https://huggingface.co/onnx-community/Nemotron-3-Diarization-ONNX/resolve/353b6f8ad2cac3580e982d7fbdf0a010786b0406/onnx";
+/// The graph, and its weights next to it under the name the graph refers to.
+const FILES: [(&str, u64); 2] = [
+    ("model_quantized.onnx", 300_000),
+    ("model_quantized.onnx_data", 120_000_000),
+];
 
 const HOP: usize = 160;
 const N_FFT: usize = 512;
 const WIN: usize = 400;
 const BINS: usize = N_FFT / 2 + 1;
+const MELS: usize = 128;
+const RATE: f64 = 16_000.0;
 const PREEMPHASIS: f32 = 0.97;
-/// Spectrum frames per frontend call, a multiple of the stacking factor; keeps
-/// the power spectrum of a long meeting out of memory all at once.
-const FRONTEND_BLOCK: usize = 8 * 4096;
 
-#[derive(serde::Deserialize)]
+/// The model's streaming config (`config.json`), offline sizes.
 struct Config {
     hidden_size: usize,
     subsampling_factor: usize,
@@ -46,12 +52,54 @@ struct Config {
     min_positive_scores_rate: f32,
     strong_boost_rate: f32,
     weak_boost_rate: f32,
+    /// Learned; the model returns it with every step.
     silence_embeds: Vec<f32>,
 }
 
+const CONFIG: Config = Config {
+    hidden_size: 512,
+    subsampling_factor: 8,
+    num_speakers: 8,
+    chunk_length: 340,
+    chunk_right_context: 40,
+    fifo_length: 40,
+    speaker_cache_update_period: 300,
+    speaker_cache_length: 264,
+    silence_frames_per_speaker: 1,
+    prediction_score_threshold: 0.25,
+    latest_frames_score_boost: 0.05,
+    min_positive_scores_rate: 0.5,
+    strong_boost_rate: 0.75,
+    weak_boost_rate: 1.5,
+    silence_embeds: Vec::new(),
+};
+
+fn dir() -> PathBuf {
+    models_dir().join("nemotron-3-diarization")
+}
+
+/// The model files, downloaded first when needed (about 120 MB).
+pub fn ensure(events: &Events, abort: &Abort) -> Result<PathBuf, String> {
+    let dir = dir();
+    for (file, min_bytes) in FILES {
+        let path = dir.join(file);
+        if std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() >= min_bytes) {
+            continue;
+        }
+        download(
+            &format!("{REPO}/{file}"),
+            &path,
+            "Downloading the speaker model",
+            min_bytes,
+            events,
+            abort,
+        )?;
+    }
+    Ok(dir.join(FILES[0].0))
+}
+
 pub struct Model {
-    frontend: Session,
-    step: Session,
+    session: Session,
     config: Config,
 }
 
@@ -60,26 +108,19 @@ fn ort_error(e: impl std::fmt::Display) -> String {
 }
 
 impl Model {
-    pub fn load(dir: &Path, step_file: &str) -> Result<Self, String> {
+    pub fn load(path: &Path) -> Result<Self, String> {
         let threads = std::thread::available_parallelism()
             .map_or(4, |n| n.get())
             .min(8);
-        let open = |file: &str| -> Result<Session, String> {
-            Session::builder()
-                .map_err(ort_error)?
-                .with_intra_threads(threads)
-                .map_err(ort_error)?
-                .commit_from_file(dir.join(file))
-                .map_err(ort_error)
-        };
-        let config: Config = serde_json::from_str(
-            &std::fs::read_to_string(dir.join("nemotron.json")).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
+        let session = Session::builder()
+            .map_err(ort_error)?
+            .with_intra_threads(threads)
+            .map_err(ort_error)?
+            .commit_from_file(path)
+            .map_err(ort_error)?;
         Ok(Self {
-            frontend: open("frontend.onnx")?,
-            step: open(step_file)?,
-            config,
+            session,
+            config: CONFIG,
         })
     }
 
@@ -91,58 +132,16 @@ impl Model {
         events: &Events,
         abort: &Abort,
     ) -> Result<Vec<f32>, String> {
-        let embeds = self.embeds(samples)?;
-        let logits = self.chunks(&embeds, events, abort)?;
-        let frames = 1 + samples.len() / HOP;
-        let n = self.config.num_speakers;
-        Ok(logits[..(frames * n).min(logits.len())]
-            .iter()
-            .map(|l| 1.0 / (1.0 + (-l).exp()))
-            .collect())
-    }
-
-    /// The encoder input for the whole file: `steps x hidden_size`.
-    fn embeds(&mut self, samples: &[f32]) -> Result<Vec<f32>, String> {
         let spectrum = Spectrum::new(samples);
-        let frames = spectrum.frames;
-        let valid = samples.len() / HOP;
-        let mut embeds = Vec::new();
-        let mut start = 0;
-        while start < frames {
-            let end = (start + FRONTEND_BLOCK).min(frames);
-            let rows = (end - start).div_ceil(8) * 8;
-            let mut block = spectrum.power(start, end);
-            block.resize(rows * BINS, 0.0);
-            let valid_here = valid.saturating_sub(start).min(rows) as i64;
-            let outputs = self
-                .frontend
-                .run(ort::inputs![
-                    "power" => Tensor::from_array(([1usize, rows, BINS], block)).map_err(ort_error)?,
-                    "valid" => Tensor::from_array(([1usize], vec![valid_here])).map_err(ort_error)?,
-                ])
-                .map_err(ort_error)?;
-            let (_, data) = outputs["embeds"]
-                .try_extract_tensor::<f32>()
-                .map_err(ort_error)?;
-            embeds.extend_from_slice(data);
-            start = end;
-        }
-        Ok(embeds)
-    }
-
-    /// The offline forward: chunks of `chunk_length` steps with look-ahead,
-    /// each run together with the speaker cache and the FIFO.
-    fn chunks(
-        &mut self,
-        embeds: &[f32],
-        events: &Events,
-        abort: &Abort,
-    ) -> Result<Vec<f32>, String> {
-        let h = self.config.hidden_size;
+        let mel = MelFilters::new();
         let factor = self.config.subsampling_factor;
         let n = self.config.num_speakers;
-        let steps = embeds.len() / h;
-        let mut cache = Cache::new(&self.config);
+        let h = self.config.hidden_size;
+        let frames = spectrum.frames;
+        let valid = samples.len() / HOP;
+        let steps = frames.div_ceil(factor);
+
+        let mut cache = Cache::new();
         let mut logits = Vec::with_capacity(steps * factor * n);
         let mut start = 0;
         while start < steps {
@@ -150,30 +149,131 @@ impl Model {
                 return Err(CANCELLED.into());
             }
             let end = (start + self.config.chunk_length).min(steps);
-            let chunk_frames = end - start;
+            let chunk_steps = end - start;
             let with_lookahead = (end + self.config.chunk_right_context).min(steps);
+            let rows = (with_lookahead - start) * factor;
+            let first = start * factor;
+            let features = mel.log_mel(&spectrum, first, (first + rows).min(frames), valid, rows);
+
             let cached = cache.embeds();
             let cached_len = cached.len() / h;
-            let mut input = cached;
-            input.extend_from_slice(&embeds[start * h..with_lookahead * h]);
-            let rows = input.len() / h;
+            let total = cached_len + with_lookahead - start;
             let outputs = self
-                .step
+                .session
                 .run(ort::inputs![
-                    "embeds" => Tensor::from_array(([1usize, rows, h], input.clone())).map_err(ort_error)?,
+                    "input_features" => Tensor::from_array(([1usize, rows, MELS], features)).map_err(ort_error)?,
+                    "cached_embeds" => Tensor::from_array(([1usize, cached_len, h], cached.clone())).map_err(ort_error)?,
+                    "attention_mask" => Tensor::from_array(([1usize, total], vec![1i64; total])).map_err(ort_error)?,
                 ])
                 .map_err(ort_error)?;
             let (_, step_logits) = outputs["logits"]
                 .try_extract_tensor::<f32>()
                 .map_err(ort_error)?;
+            let (_, chunk_embeds) = outputs["chunk_embeds"]
+                .try_extract_tensor::<f32>()
+                .map_err(ort_error)?;
+            if self.config.silence_embeds.is_empty() {
+                let (_, silence) = outputs["silence_embeds"]
+                    .try_extract_tensor::<f32>()
+                    .map_err(ort_error)?;
+                self.config.silence_embeds = silence.to_vec();
+            }
             logits.extend_from_slice(
-                &step_logits[cached_len * factor * n..(cached_len + chunk_frames) * factor * n],
+                &step_logits[cached_len * factor * n..(cached_len + chunk_steps) * factor * n],
             );
-            cache.update(&input, step_logits, chunk_frames);
+            let mut input = cached;
+            input.extend_from_slice(chunk_embeds);
+            cache.update(&self.config, &input, step_logits, chunk_steps);
             let _ = events.send_blocking(Event::Progress(end as f64 / steps as f64));
             start = end;
         }
-        Ok(logits)
+        Ok(logits[..(frames * n).min(logits.len())]
+            .iter()
+            .map(|l| 1.0 / (1.0 + (-l).exp()))
+            .collect())
+    }
+}
+
+/// librosa's Slaney mel filterbank (`librosa.filters.mel(norm="slaney")`),
+/// 257 FFT bins to 128 mel bands from 0 to 8 kHz.
+struct MelFilters {
+    /// Per band, the first FFT bin it covers and its weights from there on:
+    /// a band is a narrow triangle, so most of its 257 weights are zero.
+    bands: Vec<(usize, Vec<f32>)>,
+}
+
+impl MelFilters {
+    fn new() -> Self {
+        fn hz_to_mel(hz: f64) -> f64 {
+            let (f_sp, min_log_hz) = (200.0 / 3.0, 1000.0);
+            let logstep = 6.4f64.ln() / 27.0;
+            if hz >= min_log_hz {
+                min_log_hz / f_sp + (hz / min_log_hz).ln() / logstep
+            } else {
+                hz / f_sp
+            }
+        }
+        fn mel_to_hz(mel: f64) -> f64 {
+            let (f_sp, min_log_hz) = (200.0 / 3.0, 1000.0);
+            let min_log_mel = min_log_hz / f_sp;
+            let logstep = 6.4f64.ln() / 27.0;
+            if mel >= min_log_mel {
+                min_log_hz * (logstep * (mel - min_log_mel)).exp()
+            } else {
+                f_sp * mel
+            }
+        }
+        let top = hz_to_mel(RATE / 2.0);
+        let points: Vec<f64> = (0..MELS + 2)
+            .map(|i| mel_to_hz(top * i as f64 / (MELS + 1) as f64))
+            .collect();
+        let fft_hz: Vec<f64> = (0..BINS)
+            .map(|k| k as f64 * RATE / 2.0 / (BINS - 1) as f64)
+            .collect();
+        let mut weights = vec![0.0f32; MELS * BINS];
+        for m in 0..MELS {
+            let (lower, center, upper) = (points[m], points[m + 1], points[m + 2]);
+            let norm = 2.0 / (upper - lower);
+            for (k, hz) in fft_hz.iter().enumerate() {
+                let rising = (hz - lower) / (center - lower);
+                let falling = (upper - hz) / (upper - center);
+                weights[m * BINS + k] = (rising.min(falling).max(0.0) * norm) as f32;
+            }
+        }
+        let bands = weights
+            .chunks(BINS)
+            .map(|row| {
+                let first = row.iter().position(|w| *w > 0.0).unwrap_or(0);
+                let last = row.iter().rposition(|w| *w > 0.0).unwrap_or(0);
+                (first, row[first..=last.max(first)].to_vec())
+            })
+            .collect();
+        Self { bands }
+    }
+
+    /// `log(mel + 2^-24)` of spectrum frames `from..to`, zero from frame
+    /// `valid` on, padded with zero rows to `rows`: `rows x MELS`.
+    fn log_mel(
+        &self,
+        spectrum: &Spectrum,
+        from: usize,
+        to: usize,
+        valid: usize,
+        rows: usize,
+    ) -> Vec<f32> {
+        let power = spectrum.power(from, to);
+        let mut out = vec![0.0f32; rows * MELS];
+        for f in 0..to - from {
+            if from + f >= valid {
+                break;
+            }
+            let bins = &power[f * BINS..(f + 1) * BINS];
+            for (m, (first, w)) in self.bands.iter().enumerate() {
+                let energy: f32 = w.iter().zip(&bins[*first..]).map(|(a, b)| a * b).sum();
+                out[f * MELS + m] = (energy + 2f32.powi(-24)).ln();
+            }
+        }
+        out
     }
 }
 
@@ -238,18 +338,16 @@ impl<'a> Spectrum<'a> {
 }
 
 /// The Arrival-Order Speaker Cache and FIFO, rows of `hidden_size`.
-struct Cache<'a> {
-    config: &'a Config,
+struct Cache {
     cache_embeds: Vec<f32>,
     cache_probs: Vec<f32>,
     fifo: Vec<f32>,
     compressed: bool,
 }
 
-impl<'a> Cache<'a> {
-    fn new(config: &'a Config) -> Self {
+impl Cache {
+    fn new() -> Self {
         Self {
-            config,
             cache_embeds: Vec::new(),
             cache_probs: Vec::new(),
             fifo: Vec::new(),
@@ -266,8 +364,7 @@ impl<'a> Cache<'a> {
     /// Pushes a processed chunk to the FIFO, moving its oldest frames to the
     /// speaker cache when it overflows, and compressing the cache when that
     /// outgrows its length.
-    fn update(&mut self, input: &[f32], logits: &[f32], chunk_frames: usize) {
-        let c = self.config;
+    fn update(&mut self, c: &Config, input: &[f32], logits: &[f32], chunk_frames: usize) {
         let (h, n) = (c.hidden_size, c.num_speakers);
         let cache_len = self.cache_embeds.len() / h;
         let fifo_len = self.fifo.len() / h;
@@ -297,7 +394,7 @@ impl<'a> Cache<'a> {
             cache_probs.extend_from_slice(&fifo_probs[..popped * n]);
             fifo.drain(..popped * h);
             if cache_embeds.len() / h > c.speaker_cache_length {
-                (cache_embeds, cache_probs) = self.compress(&cache_embeds, &cache_probs);
+                (cache_embeds, cache_probs) = Self::compress(c, &cache_embeds, &cache_probs);
                 self.compressed = true;
             }
             self.cache_embeds = cache_embeds;
@@ -308,8 +405,7 @@ impl<'a> Cache<'a> {
 
     /// Frame scores for the cache: high for frames that clearly belong to one
     /// speaker; -inf for frames that are not that speaker's speech.
-    fn frame_scores(&self, probs: &[f32], frames: usize) -> Vec<f32> {
-        let c = self.config;
+    fn frame_scores(c: &Config, probs: &[f32], frames: usize) -> Vec<f32> {
         let n = c.num_speakers;
         let budget = c.speaker_cache_length / n - c.silence_frames_per_speaker;
         let min_positive = (budget as f32 * c.min_positive_scores_rate).floor() as usize;
@@ -345,11 +441,10 @@ impl<'a> Cache<'a> {
     /// Keeps the `speaker_cache_length` most telling frames, grouped by
     /// speaker and in their original order within a speaker, with one slot of
     /// learned silence per speaker.
-    fn compress(&self, embeds: &[f32], probs: &[f32]) -> (Vec<f32>, Vec<f32>) {
-        let c = self.config;
+    fn compress(c: &Config, embeds: &[f32], probs: &[f32]) -> (Vec<f32>, Vec<f32>) {
         let (h, n) = (c.hidden_size, c.num_speakers);
         let frames = embeds.len() / h;
-        let mut scores = self.frame_scores(probs, frames);
+        let mut scores = Self::frame_scores(c, probs, frames);
         for f in c.speaker_cache_length..frames {
             for s in 0..n {
                 scores[f * n + s] += c.latest_frames_score_boost;
