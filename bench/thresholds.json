@@ -1,7 +1,7 @@
 {
  "call": {"min": {"found": 0.92, "side": 0.92, "person": 0.9}, "max": {"leaked": 0}, "all_speakers": true},
  "call-speakers": {"min": {"found": 0.92, "side": 0.92, "person": 0.9}, "max": {"leaked": 0}, "all_speakers": true},
- "import": {"min": {"found": 0.92, "person": 0.9}, "max": {"speaker error": 0.05}, "all_speakers": true},
+ "import": {"min": {"found": 0.9, "person": 0.87}, "max": {"speaker error": 0.05}, "all_speakers": true},
  "music": {"min": {"found": 0.94, "side": 0.94, "person": 0.94}, "all_speakers": true},
  "room": {"min": {"found": 0.92, "side": 0.92, "person": 0.92}, "all_speakers": true},
  "silence": {"max": {"lines": 0}},

@@ -30,24 +30,27 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - name: Cache Cargo and the build
-        uses: actions/cache@v4
+      # Restored and saved as separate steps, so a failing bench still keeps
+      # the downloads and the build for the next run.
+      - name: Restore Cargo and the build
+        uses: actions/cache/restore@v4
         with:
           path: |
             /cache/cargo/registry
             /cache/cargo/git
             target
-          key: cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-
+          key: cargo-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: cargo-${{ hashFiles('Cargo.lock') }}-
 
-      - name: Cache the speech and speaker models, and the AMI meeting
-        uses: actions/cache@v4
+      - name: Restore the models and the AMI meeting
+        id: models
+        uses: actions/cache/restore@v4
         with:
           path: |
             /cache/data/omarchy-meeting-recorder/models
             bench/.cache
-          # Change the key when the default whisper model or the speaker model changes.
-          key: models-large-v3-turbo-nemotron-353b6f8-ami-ES2004a
+          # Change the key when the bench model or the speaker model changes.
+          key: models-small.en-nemotron-353b6f8-ami-ES2004a
 
       - name: Build
         run: cargo build --release
@@ -58,8 +61,36 @@ jobs:
       - name: Bench
         run: |
           set -o pipefail
-          python3 bench/run.py --ami --check --json bench-results.json | tee bench-table.txt
+          # small.en keeps a run under half an hour on GitHub's four cores; the
+          # bench is about who said what, which does not depend on the model.
+          python3 bench/run.py --ami --model small.en --check --json bench-results.json --keep bench-transcripts | tee bench-table.txt
           { echo '```'; cat bench-table.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save Cargo and the build
+        if: ${{ always() }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            /cache/cargo/registry
+            /cache/cargo/git
+            target
+          key: cargo-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+
+      - name: Save the models and the AMI meeting
+        if: ${{ always() && steps.models.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            /cache/data/omarchy-meeting-recorder/models
+            bench/.cache
+          key: models-small.en-nemotron-353b6f8-ami-ES2004a
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: bench-transcripts
+          path: bench-transcripts
+          if-no-files-found: ignore
 
       - name: Keep the scores for the comment
         if: ${{ always() && github.event_name == 'pull_request' }}

@@ -44,7 +44,7 @@ For AMI there is no script, so side and person are measured by who was speaking 
 
 ## In CI
 
-Every pull request and every push to main runs the bench with `--ami --check` on GitHub Actions (`.github/workflows/bench.yml`), and fails when a case drops below `thresholds.json`. The thresholds sit a few points under the current scores, so a different CPU does not fail a run by chance. The scores go into the run's summary, and "Bench comment" posts them on the pull request, also on pull requests from forks. A change that makes the app better can raise the thresholds in the same pull request.
+Every pull request and every push to main runs the bench with `--ami --model small.en --check` on GitHub Actions (`.github/workflows/bench.yml`), and fails when a case drops below `thresholds.json`. CI uses the `small.en` whisper model: with the app's default model a run takes over half an hour on GitHub's four cores, and the bench is mostly about who said what, which does not depend on the model. The thresholds sit a few points under the scores with `small.en`, so a different CPU does not fail a run by chance. The scores go into the run's summary, and "Bench comment" posts them on the pull request, also on pull requests from forks. A change that makes the app better can raise the thresholds in the same pull request.
 
 ## Making new cases
 

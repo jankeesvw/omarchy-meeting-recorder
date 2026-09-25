@@ -9,6 +9,8 @@
 --ami-minutes  how much of that meeting (default 5, 0 for all 17 minutes)
 --json    write the scores to FILE, to compare two binaries or models later
 --check   fail (exit 1) when a case scores below bench/thresholds.json
+--model   the whisper model to use (default: the app's own setting)
+--keep    save every transcript and speaker turns in DIR, to look into a score
 
 Columns: found = words of the script that are in the transcript; side = of
 those, on the right side of the call (you or the other side); person = with
@@ -266,11 +268,16 @@ def main():
     parser.add_argument("--ami-minutes", type=int, default=5)
     parser.add_argument("--json")
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--model")
+    parser.add_argument("--keep")
     args = parser.parse_args()
 
     cases = list(fixtures()) + (ami_cases(args.ami_minutes) if args.ami else [])
     if args.case:
         cases = [c for c in cases if c["name"] in args.case]
+    model = ["--model", args.model] if args.model else []
+    if args.keep:
+        Path(args.keep).mkdir(parents=True, exist_ok=True)
     results = {}
     for case in cases:
         name = case["name"]
@@ -279,12 +286,16 @@ def main():
         text = bool(case["truth"]) and "text" in case["truth"][0]
         try:
             if case["kind"] == "call":
-                md, secs = run(args.bin, ["transcribe", str(case["mic"]), str(case["computer"]), "--language", "en"])
+                md, secs = run(args.bin, ["transcribe", str(case["mic"]), str(case["computer"]), "--language", "en", *model])
             else:
-                md, secs = run(args.bin, ["transcribe-file", str(case["audio"]), "--language", "en"])
+                md, secs = run(args.bin, ["transcribe-file", str(case["audio"]), "--language", "en", *model])
                 turns, _ = run(args.bin, ["diarize", str(case["audio"])])
                 scored.update(score_turns(json.loads(turns), case["truth"]))
+                if args.keep:
+                    Path(args.keep, f"{name}.turns.json").write_text(turns)
             scored["seconds"] = round(secs, 1)
+            if args.keep:
+                Path(args.keep, f"{name}.md").write_text(md)
             scored.update(score_text(md, case["truth"]) if text or not case["truth"] else score_timing(md, case["truth"]))
             if case["kind"] == "import":
                 scored.pop("side", None)
