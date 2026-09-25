@@ -17,12 +17,20 @@ const CHUNK_BYTES: usize = (RATE / 50 * 2 * CHANNELS) as usize;
 /// Three seconds of 20 ms peaks.
 pub const HISTORY: usize = 150;
 const FLOOR_DB: f64 = -60.0;
+/// How much raw audio is kept around for live captions to take a window
+/// from, a little more than the window itself so one is always ready.
+const RAW_WINDOW_SECS: usize = 6;
+const RAW_WINDOW_BYTES: usize = RATE as usize * 2 * CHANNELS as usize * RAW_WINDOW_SECS;
 
 struct Inner {
     levels: VecDeque<f32>,
     file: Option<BufWriter<File>>,
     /// While paused the meters keep running but nothing is written.
     paused: bool,
+    /// The last `RAW_WINDOW_SECS` of s16le audio (RATE, CHANNELS), for live
+    /// captions to decode a recent window from. Kept regardless of `paused`,
+    /// like the levels, so a window is ready the moment captioning resumes.
+    raw: VecDeque<u8>,
 }
 
 #[derive(Clone)]
@@ -37,6 +45,7 @@ impl Source {
             levels: VecDeque::from(vec![0.0; HISTORY]),
             file: None,
             paused: false,
+            raw: VecDeque::with_capacity(RAW_WINDOW_BYTES),
         }));
         let shared = inner.clone();
         thread::spawn(move || {
@@ -83,6 +92,16 @@ impl Source {
             .copied()
             .fold(0.0, f32::max)
     }
+
+    /// The most recent `secs` seconds of raw audio (s16le, RATE, CHANNELS
+    /// interleaved), oldest first. Shorter than asked for until that much
+    /// has been captured.
+    pub fn recent_raw(&self, secs: u32) -> Vec<u8> {
+        let inner = self.inner.lock().unwrap();
+        let want = RATE as usize * 2 * CHANNELS as usize * secs as usize;
+        let start = inner.raw.len().saturating_sub(want);
+        inner.raw.iter().skip(start).copied().collect()
+    }
 }
 
 fn capture(device: &str, shared: &Mutex<Inner>) {
@@ -120,6 +139,11 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
         let mut inner = shared.lock().unwrap();
         inner.levels.pop_front();
         inner.levels.push_back(peak);
+        inner.raw.extend(buf.iter().copied());
+        let overflow = inner.raw.len().saturating_sub(RAW_WINDOW_BYTES);
+        if overflow > 0 {
+            inner.raw.drain(0..overflow);
+        }
         if !inner.paused
             && let Some(file) = inner.file.as_mut()
         {

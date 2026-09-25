@@ -3,6 +3,7 @@
 //! animation, edge to edge) and done (the transcript and what to do with it).
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
@@ -15,6 +16,7 @@ use gtk::{gio, glib};
 use crate::agent::{self, Agent};
 use crate::animation::TranscribeAnimation;
 use crate::audio::{HISTORY, Source, to_meter};
+use crate::captions::Captions;
 use crate::chapters::{self, Chapter};
 use crate::export::{self, Format, export_audio, export_tracks};
 use crate::ipc::{self, SharedStatus, Status};
@@ -297,6 +299,11 @@ struct Recorder {
     title_row: adw::EntryRow,
     format_row: adw::ComboRow,
     language_row: adw::ComboRow,
+    captions_row: adw::SwitchRow,
+    captions_label: gtk::Label,
+    /// The last line or two live captioning has produced, newest last.
+    caption_lines: RefCell<VecDeque<String>>,
+    captions: RefCell<Option<Captions>>,
     animation: TranscribeAnimation,
     meters: [gtk::DrawingArea; 2],
     compact_meters: [gtk::DrawingArea; 2],
@@ -440,9 +447,18 @@ impl Recorder {
                 .position(|(code, _)| *code == saved)
                 .unwrap_or(0) as u32,
         );
+        let captions_row = adw::SwitchRow::builder()
+            .title("Live captions")
+            .subtitle(
+                "A preview of the transcript while you talk. Off by default; \
+                 the real transcript is still made after you stop.",
+            )
+            .active(settings::captions_enabled())
+            .build();
         group.add(&title_row);
         group.add(&format_row);
         group.add(&language_row);
+        group.add(&captions_row);
         content.append(&group);
 
         let frozen: [Frozen; 2] = Default::default();
@@ -459,6 +475,16 @@ impl Recorder {
         meters_box.append(&meter_block("Computer audio", &meters[1]));
 
         content.append(&meters_box);
+
+        let captions_label = gtk::Label::builder()
+            .css_classes(["dim-label", "caption"])
+            .wrap(true)
+            .justify(gtk::Justification::Center)
+            .lines(2)
+            .ellipsize(gtk::pango::EllipsizeMode::Start)
+            .visible(false)
+            .build();
+        content.append(&captions_label);
 
         let status_row = gtk::Box::builder()
             .spacing(10)
@@ -762,6 +788,10 @@ impl Recorder {
             title_row,
             format_row,
             language_row,
+            captions_row,
+            captions_label,
+            caption_lines: RefCell::default(),
+            captions: RefCell::default(),
             animation,
             meters,
             compact_meters,
@@ -961,6 +991,22 @@ impl Recorder {
                 && r.language_row.selected() != row.selected()
             {
                 r.language_row.set_selected(row.selected());
+            }
+        });
+
+        let weak = Rc::downgrade(self);
+        self.captions_row.connect_active_notify(move |row| {
+            let Some(r) = weak.upgrade() else { return };
+            if r.loading.get() {
+                return;
+            }
+            settings::set_captions_enabled(row.is_active());
+            if r.state.get() == State::Recording && !r.paused.get() {
+                if row.is_active() {
+                    r.start_captions();
+                } else {
+                    r.stop_captions();
+                }
             }
         });
 
@@ -1509,6 +1555,9 @@ impl Recorder {
         self.mic.set_paused(self.paused.get());
         self.system.set_paused(self.paused.get());
         self.freeze_meters(self.paused.get());
+        if let Some(captions) = self.captions.borrow().as_ref() {
+            captions.set_paused(self.paused.get());
+        }
         self.set_state(State::Recording);
         self.tick();
     }
@@ -1520,6 +1569,54 @@ impl Recorder {
         for meter in self.meters.iter().chain(self.compact_meters.iter()) {
             meter.queue_draw();
         }
+    }
+
+    /// Starts live captioning if the toggle is on, replacing any session
+    /// already running. Quietly does nothing when it is off, and shows a
+    /// toast instead of starting when the speech model is not on disk yet.
+    fn start_captions(self: &Rc<Self>) {
+        self.stop_captions();
+        if !self.captions_row.is_active() {
+            return;
+        }
+        let (tx, rx) = async_channel::unbounded::<String>();
+        let language = self.selected_language();
+        match Captions::start(self.mic.clone(), self.system.clone(), language, move |line| {
+            let _ = tx.send_blocking(line);
+        }) {
+            Ok(session) => {
+                *self.captions.borrow_mut() = Some(session);
+                let weak = Rc::downgrade(self);
+                glib::spawn_future_local(async move {
+                    while let Ok(line) = rx.recv().await {
+                        let Some(r) = weak.upgrade() else { break };
+                        r.push_caption_line(line);
+                    }
+                });
+            }
+            Err(hint) => self.toast(hint),
+        }
+    }
+
+    /// Ends the session, if one is running, and clears the preview.
+    fn stop_captions(&self) {
+        self.captions.borrow_mut().take();
+        self.caption_lines.borrow_mut().clear();
+        self.captions_label.set_label("");
+        self.captions_label.set_visible(false);
+    }
+
+    /// Keeps the last two lines on screen, newest at the bottom.
+    fn push_caption_line(&self, line: String) {
+        let mut lines = self.caption_lines.borrow_mut();
+        lines.push_back(line);
+        while lines.len() > 2 {
+            lines.pop_front();
+        }
+        let text = lines.iter().map(String::as_str).collect::<Vec<_>>().join("\n");
+        drop(lines);
+        self.captions_label.set_label(&text);
+        self.captions_label.set_visible(true);
     }
 
     /// Asks for the language and the number of speakers, then imports.
@@ -1885,12 +1982,14 @@ impl Recorder {
         self.timer.set_label("00:00");
         self.compact_timer.set_label("00:00");
         self.set_state(State::Recording);
+        self.start_captions();
     }
 
     fn stop(self: &Rc<Self>) {
         if self.state.get() != State::Recording {
             return;
         }
+        self.stop_captions();
         if self.paused.get() {
             self.paused_secs
                 .set(self.paused_secs.get() + ipc::now() - self.pause_began.get());
