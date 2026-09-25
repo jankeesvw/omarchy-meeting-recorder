@@ -29,11 +29,27 @@ fn target() -> PathBuf {
 pub fn should_offer() -> bool {
     // A failed attempt may have already created our symlink. Leave other
     // installations alone, but allow retrying the link we create in add().
-    !settings::bar_widget_offered()
+    let offer = !settings::bar_widget_offered()
         && glib::find_program_in_path("omarchy").is_some()
         && PathBuf::from(SOURCE).join("manifest.json").is_file()
         && (std::fs::symlink_metadata(target()).is_err()
-            || std::fs::read_link(target()).is_ok_and(|path| path == std::path::Path::new(SOURCE)))
+            || std::fs::read_link(target()).is_ok_and(|path| path == std::path::Path::new(SOURCE)));
+    // Already on the bar, put there by hand or by an earlier version: nothing
+    // to offer, now or later.
+    if offer && enabled(&run) == Some(true) {
+        settings::set_bar_widget_offered();
+        return false;
+    }
+    offer
+}
+
+/// Whether the shell has the widget on the bar; None when the shell does not answer.
+fn enabled(run: &impl Fn(&str, &[&str]) -> Result<String, String>) -> Option<bool> {
+    let output = run("omarchy-shell", &["shell", "listPlugins"]).ok()?;
+    let plugins: Vec<serde_json::Value> = serde_json::from_str(&output).ok()?;
+    Some(plugins.iter().any(|plugin| {
+        plugin["id"].as_str() == Some(ID) && plugin["enabled"].as_bool() == Some(true)
+    }))
 }
 
 fn run(program: &str, args: &[&str]) -> Result<String, String> {
@@ -77,11 +93,14 @@ fn enable(
         let output = run("omarchy-shell", &["shell", "listPlugins"])?;
         let plugins: Vec<serde_json::Value> = serde_json::from_str(&output)
             .map_err(|e| format!("Could not read the shell's plugin list: {e}"))?;
-        if plugins
+        if let Some(plugin) = plugins
             .iter()
-            .any(|plugin| plugin["id"].as_str() == Some(ID))
+            .find(|plugin| plugin["id"].as_str() == Some(ID))
         {
-            run("omarchy", &["plugin", "enable", ID, "--section", "right"])?;
+            // Already on the bar: enabling again would move it or fail.
+            if plugin["enabled"].as_bool() != Some(true) {
+                run("omarchy", &["plugin", "enable", ID, "--section", "right"])?;
+            }
             return Ok(());
         }
         if attempt < 49 {
@@ -121,6 +140,30 @@ mod tests {
     }
 
     const FOUND: &str = r#"[{"id":"jankeesvw.meeting-recorder","enabled":false}]"#;
+    const ON_THE_BAR: &str = r#"[{"id":"jankeesvw.meeting-recorder","enabled":true}]"#;
+
+    #[test]
+    fn a_widget_already_on_the_bar_is_left_alone() {
+        let (result, calls, _) = scenario(vec![Ok(""), Ok(ON_THE_BAR)]);
+        assert_eq!(result, Ok(()));
+        assert!(
+            calls
+                .iter()
+                .all(|call| !call.starts_with("omarchy plugin enable"))
+        );
+    }
+
+    #[test]
+    fn the_shell_says_whether_it_is_on_the_bar() {
+        let answer = |text: &'static str| move |_: &str, _: &[&str]| Ok(text.to_owned());
+        assert_eq!(enabled(&answer(ON_THE_BAR)), Some(true));
+        assert_eq!(enabled(&answer(FOUND)), Some(false));
+        assert_eq!(enabled(&answer("[]")), Some(false));
+        assert_eq!(
+            enabled(&|_: &str, _: &[&str]| Err("no shell".to_owned())),
+            None
+        );
+    }
 
     #[test]
     fn waits_for_discovery_before_enabling() {
