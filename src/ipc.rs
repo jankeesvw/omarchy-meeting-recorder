@@ -38,6 +38,33 @@ pub struct Status {
 }
 
 pub type SharedStatus = Arc<Mutex<Status>>;
+/// One status per open window; the socket reports the busiest.
+pub type Statuses = Arc<Mutex<Vec<SharedStatus>>>;
+
+/// How much a window's state matters to the bar: the one recording first.
+fn rank(state: &str) -> u8 {
+    match state {
+        "recording" | "paused" => 4,
+        "stopping" => 3,
+        "transcribing" => 2,
+        "done" => 1,
+        _ => 0,
+    }
+}
+
+/// The status the bar widget shows: the busiest window's.
+pub fn busiest(statuses: &Statuses) -> Status {
+    statuses
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| s.lock().unwrap().clone())
+        .max_by_key(|s| rank(s.state))
+        .unwrap_or(Status {
+            state: "idle",
+            ..Default::default()
+        })
+}
 
 fn socket_path() -> PathBuf {
     glib::user_runtime_dir().join(format!("{APP_NAME}.sock"))
@@ -51,13 +78,13 @@ pub fn now() -> i64 {
 }
 
 /// Commands a client may send, one per line.
-pub const COMMANDS: [&str; 4] = ["start", "stop", "compact", "pause"];
+pub const COMMANDS: [&str; 5] = ["start", "stop", "compact", "pause", "new-window"];
 
 /// Starts the socket server. Called once, from the primary instance. Clients
-/// get the state lines; a line a client writes that names one of `COMMANDS` is
-/// passed on to `commands`.
+/// get the state lines of the busiest window; a line a client writes that
+/// names one of `COMMANDS` is passed on to `commands`.
 pub fn serve(
-    status: SharedStatus,
+    statuses: Statuses,
     mic: Source,
     system: Source,
     commands: async_channel::Sender<&'static str>,
@@ -94,7 +121,7 @@ pub fn serve(
 
     thread::spawn(move || {
         loop {
-            let snapshot = status.lock().unwrap().clone();
+            let snapshot = busiest(&statuses);
             let recording = snapshot.state == "recording";
             let taking = recording || snapshot.state == "paused";
             let until = if snapshot.pause_began > 0 {
@@ -191,5 +218,35 @@ pub fn watch() {
             return;
         }
         thread::sleep(Duration::from_secs(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(state: &'static str, title: &str) -> SharedStatus {
+        Arc::new(Mutex::new(Status {
+            state,
+            title: title.into(),
+            ..Default::default()
+        }))
+    }
+
+    #[test]
+    fn the_bar_follows_the_busiest_window() {
+        let statuses = Statuses::default();
+        assert_eq!(busiest(&statuses).state, "idle");
+        statuses.lock().unwrap().extend([
+            status("done", "Old meeting"),
+            status("transcribing", "Weekly"),
+            status("idle", ""),
+        ]);
+        assert_eq!(busiest(&statuses).title, "Weekly");
+        statuses
+            .lock()
+            .unwrap()
+            .push(status("recording", "Standup"));
+        assert_eq!(busiest(&statuses).title, "Standup");
     }
 }

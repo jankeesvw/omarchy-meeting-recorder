@@ -69,6 +69,164 @@ fn source_track(meeting_dir: &std::path::Path) -> PathBuf {
 /// Choices in the import dialog: automatic, then a fixed number.
 const SPEAKER_CHOICES: [&str; 7] = ["Automatic", "1", "2", "3", "4", "5", "6"];
 
+/// What all windows share: the audio sources, the socket for the bar widget
+/// and the keybindings, and the list of open windows. Every window can show
+/// its own meeting; only one records at a time.
+struct Hub {
+    mic: Source,
+    system: Source,
+    statuses: ipc::Statuses,
+    /// The open windows, oldest first. Held here: the window's own callbacks
+    /// only hold weak references, so this is what keeps a window's recorder
+    /// alive until the window is gone.
+    windows: RefCell<Vec<Rc<Recorder>>>,
+}
+
+impl Hub {
+    fn new(app: &adw::Application) -> Rc<Self> {
+        let hub = Rc::new(Hub {
+            mic: Source::spawn("@DEFAULT_SOURCE@"),
+            system: Source::spawn("@DEFAULT_MONITOR@"),
+            statuses: ipc::Statuses::default(),
+            windows: RefCell::default(),
+        });
+        let (commands_tx, commands_rx) = async_channel::unbounded();
+        ipc::serve(
+            hub.statuses.clone(),
+            hub.mic.clone(),
+            hub.system.clone(),
+            commands_tx,
+        );
+        let weak = Rc::downgrade(&hub);
+        let app_for_commands = app.clone();
+        glib::spawn_future_local(async move {
+            while let Ok(command) = commands_rx.recv().await {
+                let Some(hub) = weak.upgrade() else {
+                    break;
+                };
+                hub.command(&app_for_commands, command);
+            }
+        });
+
+        let new_window = gio::SimpleAction::new("new-window", None);
+        let weak = Rc::downgrade(&hub);
+        let app_for_new = app.clone();
+        new_window.connect_activate(move |_, _| {
+            if let Some(hub) = weak.upgrade() {
+                hub.add_window(&app_for_new).window.present();
+            }
+        });
+        app.add_action(&new_window);
+
+        // Quitting closes every window; one in the middle of a meeting asks first.
+        let quit = gio::SimpleAction::new("quit", None);
+        let weak = Rc::downgrade(&hub);
+        quit.connect_activate(move |_, _| {
+            if let Some(hub) = weak.upgrade() {
+                for recorder in hub.recorders() {
+                    recorder.window.close();
+                }
+            }
+        });
+        app.add_action(&quit);
+        hub
+    }
+
+    fn add_window(self: &Rc<Self>, app: &adw::Application) -> Rc<Recorder> {
+        let recorder = Recorder::new(app, self);
+        self.windows.borrow_mut().push(recorder.clone());
+        let weak = Rc::downgrade(self);
+        let status = recorder.shared.clone();
+        recorder.window.connect_destroy(move |_| {
+            if let Some(hub) = weak.upgrade() {
+                hub.statuses
+                    .lock()
+                    .unwrap()
+                    .retain(|s| !Arc::ptr_eq(s, &status));
+                hub.windows
+                    .borrow_mut()
+                    .retain(|r| !Arc::ptr_eq(&r.shared, &status));
+            }
+        });
+        recorder
+    }
+
+    /// The open windows, oldest first.
+    fn recorders(&self) -> Vec<Rc<Recorder>> {
+        self.windows.borrow().clone()
+    }
+
+    /// The window that is recording, if any.
+    fn recording(&self) -> Option<Rc<Recorder>> {
+        self.recorders()
+            .into_iter()
+            .find(|r| matches!(r.state.get(), State::Recording | State::Stopping))
+    }
+
+    /// Where the bar widget and the keybindings act: the window recording,
+    /// else the one transcribing, else the one in front, else a new one.
+    fn target(self: &Rc<Self>, app: &adw::Application) -> Rc<Recorder> {
+        let recorders = self.recorders();
+        let active = app.active_window();
+        self.recording()
+            .or_else(|| {
+                recorders
+                    .iter()
+                    .find(|r| r.state.get() == State::Transcribing)
+                    .cloned()
+            })
+            .or_else(|| {
+                recorders
+                    .iter()
+                    .find(|r| active.as_ref() == Some(r.window.upcast_ref()))
+                    .cloned()
+            })
+            .or_else(|| recorders.last().cloned())
+            .unwrap_or_else(|| self.add_window(app))
+    }
+
+    /// A window free to show a meeting: the one in front when it is not busy,
+    /// else another free one, else a new one.
+    fn free_window(self: &Rc<Self>, app: &adw::Application) -> Rc<Recorder> {
+        let free = |r: &Rc<Recorder>| matches!(r.state.get(), State::Idle | State::Done);
+        let recorders = self.recorders();
+        let active = app.active_window();
+        recorders
+            .iter()
+            .find(|r| active.as_ref() == Some(r.window.upcast_ref()) && free(r))
+            .or_else(|| recorders.iter().rev().find(|r| free(r)))
+            .cloned()
+            .unwrap_or_else(|| self.add_window(app))
+    }
+
+    /// A command from the socket: `omarchy-meeting-recorder start` and friends.
+    fn command(self: &Rc<Self>, app: &adw::Application, command: &str) {
+        if command == "new-window" {
+            self.add_window(app).window.present();
+            return;
+        }
+        let r = match command {
+            // Starting takes a window that is free, so a meeting being
+            // transcribed stays on screen.
+            "start" => self.recording().unwrap_or_else(|| self.free_window(app)),
+            _ => self.target(app),
+        };
+        match command {
+            // A name typed on the ready page is kept; from the done page
+            // it starts fresh.
+            "start" if r.state.get() == State::Idle => r.start(),
+            "start" if r.state.get() == State::Done => {
+                r.ready();
+                r.start();
+            }
+            "stop" => r.stop(),
+            "compact" => r.set_compact(!r.compact.get()),
+            "pause" => r.toggle_pause(),
+            _ => {}
+        }
+    }
+}
+
 /// Runs the app. `open` is a `.meeting-recorder` file or a meeting folder to show
 /// instead of starting a new recording.
 pub fn run(open: Option<&str>) -> glib::ExitCode {
@@ -86,32 +244,38 @@ pub fn run(open: Option<&str>) -> glib::ExitCode {
         app.set_accels_for_action("win.compact", &["<Control>m"]);
         app.set_accels_for_action("window.close", &["<Control>w"]);
         app.set_accels_for_action("app.quit", &["<Control>q"]);
+        app.set_accels_for_action("app.new-window", &["<Control>n"]);
     });
-    let recorder: Rc<RefCell<Option<Rc<Recorder>>>> = Rc::default();
-    let get = {
-        let recorder = recorder.clone();
+    // Made on the first activation, once GTK is up: it starts the audio.
+    let hub: Rc<RefCell<Option<Rc<Hub>>>> = Rc::default();
+    let get_hub = {
+        let hub = hub.clone();
         move |app: &adw::Application| {
-            let existing = recorder.borrow().clone();
+            let existing = hub.borrow().clone();
             existing.unwrap_or_else(|| {
-                let created = Recorder::new(app);
-                *recorder.borrow_mut() = Some(created.clone());
+                let created = Hub::new(app);
+                *hub.borrow_mut() = Some(created.clone());
                 created
             })
         }
     };
-    let get_for_open = get.clone();
+    let hub_for_open = get_hub.clone();
     app.connect_open(move |app, files, _| {
-        let recorder = get_for_open(app);
+        let hub = hub_for_open(app);
+        // A window in the middle of a meeting keeps it; the file gets its own.
+        let recorder = hub.free_window(app);
         if let Some(path) = files.first().and_then(|f| f.path()) {
             recorder.open_meeting(&path);
         }
         recorder.window.present();
     });
     app.connect_activate(move |app| {
-        let recorder = get(app);
+        let hub = get_hub(app);
+        let first = hub.recorders().is_empty();
+        let recorder = hub.target(app);
         // Opened again while it was finishing in the background: stay open.
         recorder.quit_when_done.set(false);
-        if recorder.state.get() == State::Idle {
+        if first && recorder.state.get() == State::Idle {
             let recorder = recorder.clone();
             glib::idle_add_local_once(move || recorder.offer_recovery());
         }
@@ -179,6 +343,7 @@ struct Recorder {
     mic: Source,
     system: Source,
     shared: SharedStatus,
+    hub: std::rc::Weak<Hub>,
 
     state: Cell<State>,
     compact: Cell<bool>,
@@ -208,15 +373,14 @@ struct Recorder {
 }
 
 impl Recorder {
-    fn new(app: &adw::Application) -> Rc<Self> {
-        let mic = Source::spawn("@DEFAULT_SOURCE@");
-        let system = Source::spawn("@DEFAULT_MONITOR@");
+    fn new(app: &adw::Application, hub: &Rc<Hub>) -> Rc<Self> {
+        let mic = hub.mic.clone();
+        let system = hub.system.clone();
         let shared: SharedStatus = Arc::new(Mutex::new(Status {
             state: "idle",
             ..Default::default()
         }));
-        let (commands_tx, commands_rx) = async_channel::unbounded();
-        ipc::serve(shared.clone(), mic.clone(), system.clone(), commands_tx);
+        hub.statuses.lock().unwrap().push(shared.clone());
 
         let window = adw::ApplicationWindow::builder()
             .application(app)
@@ -587,8 +751,6 @@ impl Recorder {
         window.add_action(&compact_action);
         let run_action = gio::SimpleAction::new("run-action", Some(glib::VariantTy::INT32));
         window.add_action(&run_action);
-        let quit_action = gio::SimpleAction::new("quit", None);
-        app.add_action(&quit_action);
 
         let recorder = Rc::new(Recorder {
             window,
@@ -637,6 +799,7 @@ impl Recorder {
             mic,
             system,
             shared,
+            hub: Rc::downgrade(hub),
             state: Cell::new(State::Idle),
             compact: Cell::new(false),
             full_size: Cell::new(FULL_SIZE),
@@ -659,36 +822,12 @@ impl Recorder {
             loading: Cell::new(false),
             manifest: RefCell::default(),
         });
-        recorder.connect_signals(&open_button, &new_button, &quit_action);
-        let weak = Rc::downgrade(&recorder);
-        glib::spawn_future_local(async move {
-            while let Ok(command) = commands_rx.recv().await {
-                let Some(r) = weak.upgrade() else { break };
-                match command {
-                    // A name typed on the ready page is kept; from the done page
-                    // it starts fresh.
-                    "start" if r.state.get() == State::Idle => r.start(),
-                    "start" if r.state.get() == State::Done => {
-                        r.ready();
-                        r.start();
-                    }
-                    "stop" => r.stop(),
-                    "compact" => r.set_compact(!r.compact.get()),
-                    "pause" => r.toggle_pause(),
-                    _ => {}
-                }
-            }
-        });
+        recorder.connect_signals(&open_button, &new_button);
         recorder.render();
         recorder
     }
 
-    fn connect_signals(
-        self: &Rc<Self>,
-        open_button: &gtk::Button,
-        new_button: &gtk::Button,
-        quit_action: &gio::SimpleAction,
-    ) {
+    fn connect_signals(self: &Rc<Self>, open_button: &gtk::Button, new_button: &gtk::Button) {
         let weak = Rc::downgrade(self);
         self.button.connect_clicked(move |_| {
             let Some(r) = weak.upgrade() else { return };
@@ -794,12 +933,6 @@ impl Recorder {
         });
 
         // Ctrl+Q goes through the same check as the close button.
-        let weak = Rc::downgrade(self);
-        quit_action.connect_activate(move |_, _| {
-            if let Some(r) = weak.upgrade() {
-                r.window.close();
-            }
-        });
 
         let weak = Rc::downgrade(self);
         self.format_row.connect_selected_notify(move |_| {
@@ -1706,6 +1839,13 @@ impl Recorder {
     }
 
     fn start(self: &Rc<Self>) {
+        // One recording at a time: the audio sources are shared by all windows.
+        if let Some(other) = self.hub.upgrade().and_then(|hub| hub.recording())
+            && !Rc::ptr_eq(&other, self)
+        {
+            self.toast("Another window is recording");
+            return;
+        }
         // A name typed before starting is kept; otherwise one from the time.
         if self.title_row.text().trim().is_empty() {
             let title = glib::DateTime::now_local()
@@ -2034,7 +2174,23 @@ impl Recorder {
         if self.quit_when_done.get()
             && let Some(app) = self.window.application()
         {
-            app.quit();
+            // Closed while busy: now it is done, it goes. The app goes with it
+            // unless another window is still open.
+            let others = self
+                .hub
+                .upgrade()
+                .map(|hub| {
+                    hub.recorders()
+                        .into_iter()
+                        .filter(|r| !Rc::ptr_eq(r, self))
+                        .count()
+                })
+                .unwrap_or(0);
+            if others > 0 {
+                self.window.destroy();
+            } else {
+                app.quit();
+            }
         }
     }
 
@@ -2044,6 +2200,18 @@ impl Recorder {
             self.state.get(),
             State::Recording | State::Stopping | State::Transcribing
         ) {
+            // This window is busy with its own meeting: open it in another.
+            if let (Some(hub), Some(app)) = (self.hub.upgrade(), self.window.application()) {
+                let app = app
+                    .downcast::<adw::Application>()
+                    .expect("an adw::Application");
+                let other = hub.free_window(&app);
+                if !Rc::ptr_eq(&other, self) {
+                    other.open_meeting(path);
+                    other.window.present();
+                    return;
+                }
+            }
             self.toast("Finish the current recording first");
             return;
         }
@@ -2878,7 +3046,7 @@ impl Recorder {
         let dialog = adw::AlertDialog::new(
             Some("Still recording"),
             Some(
-                "Closing stops the meeting. The audio is saved and transcribed first, then the app quits.",
+                "Closing stops the meeting. The audio is saved and transcribed first, then the window closes.",
             ),
         );
         dialog.add_response("keep", "Keep recording");

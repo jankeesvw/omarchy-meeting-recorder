@@ -116,10 +116,11 @@ If the app quits while it records (a crash, a logout, a power cut), the next sta
 
 ## Handy to know
 
-- **Keyboard.** Ctrl+M switches between the full window and the compact strip. On the done page Enter copies the transcript. Ctrl+W and Ctrl+Q close, and ask first while recording or transcribing.
+- **Keyboard.** Ctrl+M switches between the full window and the compact strip. Ctrl+N opens another window. On the done page Enter copies the transcript. Ctrl+W closes the window and Ctrl+Q all of them, and they ask first while recording or transcribing.
 - **The name** stays editable all the time. After the transcript is done, changing it (Enter, or leaving the field) renames the meeting folder and the heading in the transcript.
 - **Closing** while recording or transcribing asks first. You can stop and close, let the transcription finish in the background and quit afterwards, or cancel the transcription; the audio is kept either way.
-- **Opening a meeting later.** Double-click its `.meeting-recorder` file, or run `omarchy-meeting-recorder <folder>`. It opens on the done page with the settings it was made with.
+- **Opening a meeting later.** Double-click its `.meeting-recorder` file, or run `omarchy-meeting-recorder <folder>`. It opens on the done page with the settings it was made with. When the window is busy recording or transcribing, the meeting opens in a window of its own.
+- **More than one window.** Ctrl+N, `omarchy-meeting-recorder new-window` or New Window in the launcher opens another one, to read an older meeting or start the next while the last one is still transcribing. Every window shows its own meeting; one records at a time. The bar widget and the keybindings follow the window that is recording, else the one transcribing.
 - **Keybindings.** `omarchy-meeting-recorder start`, `pause`, `stop` and `compact` control the running app, so you can bind them to keys in Hyprland.
 
 ## What it writes to disk
@@ -249,6 +250,7 @@ This also recovers a failed first-start “Add to Bar” attempt in version 1.0.
 | `omarchy-meeting-recorder pause` | Pause or resume the running recording |
 | `omarchy-meeting-recorder stop` | Stop the running recording |
 | `omarchy-meeting-recorder compact` | Switch the recording window between full and compact |
+| `omarchy-meeting-recorder new-window` | Open another window, or the app when it is not running |
 | `omarchy-meeting-recorder watch` | Stream the recorder state as NDJSON, for the bar widget |
 | `omarchy-meeting-recorder transcribe <mic> <computer> [--language xx] [--model name]` | Transcribe two tracks and print the transcript as Markdown |
 | `omarchy-meeting-recorder transcribe-file <audio> [--speakers N] [--language xx] [--model name]` | Transcribe one file, telling the voices apart, and print the transcript as Markdown |

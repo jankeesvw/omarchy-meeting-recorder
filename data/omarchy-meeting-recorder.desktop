@@ -11,3 +11,8 @@ StartupWMClass=com.jankeesvw.OmarchyMeetingRecorder
 StartupNotify=true
 Categories=AudioVideo;Audio;Recorder;
 MimeType=application/x-omarchy-meeting;
+Actions=new-window;
+
+[Desktop Action new-window]
+Name=New Window
+Exec=omarchy-meeting-recorder new-window

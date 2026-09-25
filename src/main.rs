@@ -46,6 +46,14 @@ fn main() -> glib::ExitCode {
         Some("diarize") => diarize::cli(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("transcribe") => transcribe::cli(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("action") => actions::cli(&std::env::args().skip(2).collect::<Vec<_>>()),
+        // A new window in the running app, or the app itself when it is not running.
+        Some("new-window") => {
+            if ipc::send("new-window") {
+                glib::ExitCode::SUCCESS
+            } else {
+                ui::run(None)
+            }
+        }
         Some("ask") => agent::cli(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("-h" | "--help") => {
             println!(
@@ -64,6 +72,9 @@ fn main() -> glib::ExitCode {
                 "  ask           run a prompt over stdin through the default agent, without tools"
             );
             println!("  action        run one of your actions on a meeting folder");
+            println!(
+                "  new-window    open another window, for a second meeting (Ctrl+N in the app)"
+            );
             glib::ExitCode::SUCCESS
         }
         Some(path)
