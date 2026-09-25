@@ -11,7 +11,8 @@
 //! The command runs through `sh -c` in the meeting folder, with that folder as
 //! `$1` and the meeting described in `MEETING_*` variables. What it prints last
 //! is shown when it is done; a link there (web or `obsidian://`) goes behind an
-//! Open button instead.
+//! Open button instead. An action may change the meeting itself: when it
+//! edited the transcript or the meeting file, the done page reads them again.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -213,6 +214,18 @@ pub fn cli(args: &[String]) -> gtk::glib::ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// When the transcript and the meeting file of `dir` last changed, and their
+/// sizes: compared before and after an action to see whether it edited them.
+pub fn fingerprint(dir: &Path) -> Vec<Option<(std::time::SystemTime, u64)>> {
+    [Some(dir.join("transcript.md")), crate::meeting::find(dir)]
+        .into_iter()
+        .map(|path| {
+            let meta = std::fs::metadata(path?).ok()?;
+            Some((meta.modified().ok()?, meta.len()))
+        })
+        .collect()
 }
 
 fn last_line(text: &str) -> Option<String> {

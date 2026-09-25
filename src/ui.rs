@@ -1091,15 +1091,21 @@ impl Recorder {
         running.set_use_markup(false);
         running.set_timeout(0);
         self.toasts.add_toast(running.clone());
+        let before = crate::actions::fingerprint(&dir);
         let (tx, rx) = async_channel::bounded(1);
         let name = action.name.clone();
+        let folder = dir.clone();
         std::thread::spawn(move || {
-            let _ = tx.send_blocking(crate::actions::run(&action, &dir, &manifest));
+            let _ = tx.send_blocking(crate::actions::run(&action, &folder, &manifest));
         });
         let this = self.clone();
         glib::spawn_future_local(async move {
             let result = rx.recv().await;
             running.dismiss();
+            // The action may have edited the meeting: show what is on disk now.
+            if crate::actions::fingerprint(&dir) != before {
+                this.reload_meeting(&dir);
+            }
             let Ok(result) = result else { return };
             let toast = match result {
                 Ok(outcome) => {
@@ -1126,6 +1132,23 @@ impl Recorder {
             };
             this.toasts.add_toast(toast);
         });
+    }
+
+    /// Reads the meeting on the done page again after something else changed
+    /// it, keeping the player and the scroll position where they are.
+    fn reload_meeting(self: &Rc<Self>, dir: &std::path::Path) {
+        if self.state.get() != State::Done || self.result_dir.borrow().as_deref() != Some(dir) {
+            return;
+        }
+        let Some((_, manifest)) = meeting::open(dir) else {
+            return;
+        };
+        self.done_title_row.set_text(&manifest.title);
+        self.title_row.set_text(&manifest.title);
+        *self.manifest.borrow_mut() = Some(manifest);
+        if let Ok(text) = std::fs::read_to_string(dir.join("transcript.md")) {
+            self.redraw_transcript(&text);
+        }
     }
 
     fn toast(&self, message: &str) {
