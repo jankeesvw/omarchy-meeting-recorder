@@ -10,8 +10,8 @@
 //!
 //! The command runs through `sh -c` in the meeting folder, with that folder as
 //! `$1` and the meeting described in `MEETING_*` variables. What it prints last
-//! is shown when it is done; a link there (web or `obsidian://`) gets an Open
-//! button.
+//! is shown when it is done; a link there (web or `obsidian://`) goes behind an
+//! Open button instead.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -148,10 +148,21 @@ pub fn run(action: &Action, dir: &Path, manifest: &Manifest) -> Result<Outcome, 
             .unwrap_or_else(|| format!("exited with {}", output.status));
         return Err(why);
     }
-    let message = last_line(&stdout).unwrap_or_else(|| "Done".to_owned());
+    let line = last_line(&stdout).unwrap_or_default();
+    let url = find_url(&line);
+    // The link goes behind the Open button, so the message is only the words.
+    let message = match &url {
+        Some(url) => line.replace(url.as_str(), ""),
+        None => line,
+    };
+    let message = message.trim().trim_end_matches(':').trim().to_owned();
     Ok(Outcome {
-        url: find_url(&message),
-        message,
+        message: if message.is_empty() {
+            "Done".to_owned()
+        } else {
+            message
+        },
+        url,
     })
 }
 
@@ -259,6 +270,48 @@ name = "not an action"
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_link_goes_behind_the_button_and_out_of_the_message() {
+        let dir = std::env::temp_dir().join(format!("mr-action-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = Manifest {
+            title: "Weekly".into(),
+            started_at: 0,
+            duration_secs: 60,
+            format: crate::export::Format::Mono,
+            language: "en".into(),
+            speakers: vec!["Maya".into(), "Tom".into()],
+            imported: None,
+            speaker_count: None,
+            model: None,
+            chapters: Vec::new(),
+            chapters_by: None,
+        };
+        let action = |command: &str| Action {
+            name: "Test".into(),
+            command: command.into(),
+        };
+        let saved = run(
+            &action("echo busy; echo Saved obsidian://open?file=Weekly"),
+            &dir,
+            &manifest,
+        )
+        .unwrap();
+        assert_eq!(saved.message, "Saved");
+        assert_eq!(saved.url.as_deref(), Some("obsidian://open?file=Weekly"));
+        let named = run(
+            &action(r#"echo "$MEETING_TITLE by $(echo "$MEETING_SPEAKERS" | head -1)""#),
+            &dir,
+            &manifest,
+        )
+        .unwrap();
+        assert_eq!(named.message, "Weekly by Maya");
+        assert!(named.url.is_none());
+        let failed = run(&action("echo nope >&2; exit 3"), &dir, &manifest);
+        assert_eq!(failed.err().as_deref(), Some("nope"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

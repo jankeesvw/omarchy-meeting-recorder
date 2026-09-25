@@ -43,7 +43,7 @@ The command runs through `sh -c` in the meeting folder, so `~`, pipes and `VAR=v
 
 ## What the app shows
 
-While the command runs, the app says so. When it is done, it shows the last line the command printed; when it fails (a non-zero exit), the last line of its error output. A link on that line, to a web page or an `obsidian://` note, gets an **Open** button.
+While the command runs, the app says so. When it is done, it shows the last line the command printed; when it fails (a non-zero exit), the last line of its error output. A link on that line, to a web page or an `obsidian://` note, goes behind an **Open** button, so `Saved obsidian://open?vault=...` shows as just "Saved" with Open next to it.
 
 Your default agent can do the thinking inside an action: `omarchy-meeting-recorder ask "<prompt>" < "$MEETING_TRANSCRIPT"` runs a prompt over the transcript and prints the answer. Both examples below use it.
 
@@ -145,7 +145,7 @@ note.write_text("\n".join(lines))
 
 link = "obsidian://open?" + urllib.parse.urlencode({"vault": vault.name, "file": f"{folder}/{name}"},
                                                     quote_via=urllib.parse.quote)
-print(f"Saved in {vault.name}: {link}")
+print(f"Saved {link}")
 ```
 
 ## Example: Publish as public transcript
@@ -190,7 +190,7 @@ page="$tmp/$(printf '%s' "$MEETING_TITLE" | tr -c 'A-Za-z0-9 _-' '-' | tr ' ' '-
 } > "$page"
 
 url=$(gh gist create --desc "$MEETING_TITLE ($MEETING_DATE)" "$page")
-echo "Published as a secret gist: $url"
+echo "Published as a secret gist $url"
 ```
 
 ## For your agent
@@ -199,7 +199,7 @@ Point your coding agent at this page and ask it for an action, for instance: *"W
 
 - An action is an entry in `~/.config/omarchy-meeting-recorder/config.toml`: a `[[action]]` table with `name` (the menu label) and `command` (run with `sh -c`). Add to the file, never replace what is there.
 - The command runs in the meeting folder, gets it as `$1`, and gets the `MEETING_*` variables in the table above. Read the transcript from `$MEETING_TRANSCRIPT`; the speakers and chapters are in the JSON at `$MEETING_MANIFEST`. stdin is empty.
-- Print one line when done: it is shown to the user. Put a link in that line to get an Open button. Exit non-zero on failure and write the reason to stderr; its last line is shown.
+- Print one short line when done: it is shown to the user. Put a link in that line and it goes behind an Open button, out of the text: `Saved obsidian://...`, `Published https://...`. Exit non-zero on failure and write the reason to stderr; its last line is shown.
 - For text work, use the user's own agent: `omarchy-meeting-recorder ask "<prompt>" < "$MEETING_TRANSCRIPT"` prints the answer. It runs without tools. Keep what was said verbatim; let the agent only add summaries around it.
 - A meeting is private. Never send it anywhere the user did not ask for, and say so in the action's name when it leaves the machine.
 - Test it with `omarchy-meeting-recorder action "<name>" <meeting folder>` before telling the user it works.

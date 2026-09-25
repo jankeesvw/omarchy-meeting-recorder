@@ -1103,7 +1103,7 @@ impl Recorder {
             let Ok(result) = result else { return };
             let toast = match result {
                 Ok(outcome) => {
-                    let toast = adw::Toast::new(&format!("{name}: {}", outcome.message));
+                    let toast = adw::Toast::new(&outcome.message);
                     toast.set_use_markup(false);
                     if let Some(url) = outcome.url {
                         toast.set_button_label(Some("Open"));

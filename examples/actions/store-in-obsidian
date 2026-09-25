@@ -74,4 +74,4 @@ note.write_text("\n".join(lines))
 
 link = "obsidian://open?" + urllib.parse.urlencode({"vault": vault.name, "file": f"{folder}/{name}"},
                                                     quote_via=urllib.parse.quote)
-print(f"Saved in {vault.name}: {link}")
+print(f"Saved {link}")

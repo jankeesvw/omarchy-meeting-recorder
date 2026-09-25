@@ -27,4 +27,4 @@ page="$tmp/$(printf '%s' "$MEETING_TITLE" | tr -c 'A-Za-z0-9 _-' '-' | tr ' ' '-
 } > "$page"
 
 url=$(gh gist create --desc "$MEETING_TITLE ($MEETING_DATE)" "$page")
-echo "Published as a secret gist: $url"
+echo "Published as a secret gist $url"
