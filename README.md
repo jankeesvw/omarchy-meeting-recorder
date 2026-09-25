@@ -164,6 +164,16 @@ The command-line `transcribe` and `transcribe-file` take `--model` instead. When
 
 The app looks for `ggml-<model>.bin`, for instance `ggml-large-v3-turbo.bin`, in `~/.local/share/omarchy-meeting-recorder/models/`. If you use [voxtype](https://voxtype.io) and it already downloaded that model to `~/.local/share/voxtype/models/`, that copy is used. Otherwise it is downloaded (about 1.6 GB for `large-v3-turbo`) from [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp). Finding speakers downloads the speaker model on first use (about 120 MB) to `nemotron-3-diarization/` in the same directory: the int8 ONNX export of Nemotron 3 Diarization from the [Hugging Face ONNX community](https://huggingface.co/onnx-community/Nemotron-3-Diarization-ONNX), pinned to one revision. The model is NVIDIA's, under the [OpenMDW license](https://huggingface.co/nvidia/Nemotron-3-Diarization). ONNX Runtime is compiled into the binary, so nothing else is needed at runtime.
 
+### After the transcript
+
+To do something of your own with every meeting (file it in your notes, summarize it, copy it to a backup), set a command in the same `config.toml`:
+
+```toml
+after_transcript = "~/bin/file-meeting"
+```
+
+It runs once a new transcript is written: after a recording, an import or Transcribe again, and after the chapters when an agent makes them. It gets the meeting folder as its argument, and also `$MEETING_DIR`, `$MEETING_TRANSCRIPT` and `$MEETING_MANIFEST`, pointing at the folder, `transcript.md` and the `.meeting-recorder` file. It runs in the background and keeps going when the app closes. Opening an old meeting does not run it.
+
 ## Privacy
 
 The audio, the transcript and everything else stay on your computer. The only thing that leaves it is the transcript text for the chapters, and only when you have set a default agent: it goes to that agent's service, the one you already chose and pay for. No agent, no chapters, nothing sent.

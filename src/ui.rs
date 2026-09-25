@@ -17,6 +17,7 @@ use crate::animation::TranscribeAnimation;
 use crate::audio::{HISTORY, Source, to_meter};
 use crate::chapters::{self, Chapter};
 use crate::export::{self, Format, export_audio, export_tracks};
+use crate::hook;
 use crate::ipc::{self, SharedStatus, Status};
 use crate::meeting::{self, Manifest};
 use crate::player::Player;
@@ -197,6 +198,8 @@ struct Recorder {
     result_dir: RefCell<Option<PathBuf>>,
     abort: RefCell<Option<Abort>>,
     quit_when_done: Cell<bool>,
+    /// A fresh transcript whose `after_transcript` command waits for its chapters.
+    hook_pending: Cell<bool>,
     /// Set while a meeting's own settings are shown, so they are not saved as defaults.
     loading: Cell<bool>,
     /// The settings of the meeting on the done page.
@@ -633,6 +636,7 @@ impl Recorder {
             result_dir: RefCell::default(),
             abort: RefCell::default(),
             quit_when_done: Cell::new(false),
+            hook_pending: Cell::new(false),
             loading: Cell::new(false),
             manifest: RefCell::default(),
         });
@@ -1864,9 +1868,19 @@ impl Recorder {
         } else {
             self.window.set_default_widget(Some(&self.copy_button));
             self.copy_button.grab_focus();
-            // A fresh transcript gets chapters when an agent is around.
-            if self.can_have_chapters() {
+            // A fresh transcript gets chapters when an agent is around, and
+            // the `after_transcript` command runs once they are in. When the
+            // app is about to quit there is no time for chapters.
+            if self.can_have_chapters() && !self.quit_when_done.get() {
+                self.hook_pending.set(hook::configured().is_some());
                 self.generate_chapters();
+            } else {
+                if self.can_have_chapters() {
+                    self.generate_chapters();
+                }
+                if let Some(dir) = self.result_dir.borrow().as_ref() {
+                    hook::run(dir);
+                }
             }
         }
         if self.quit_when_done.get()
@@ -2128,6 +2142,7 @@ impl Recorder {
             .await
             .unwrap_or_else(|_| Err("the agent stopped unexpectedly".into()));
             this.generating.set(false);
+            let hook_pending = this.hook_pending.replace(false);
             // The folder may have been renamed meanwhile (same timestamp
             // prefix); a different meeting is left alone.
             let prefix = |p: &std::path::Path| {
@@ -2147,6 +2162,10 @@ impl Recorder {
                     this.chapters_group
                         .set_description(Some(&format!("{} could not make chapters", agent.name)));
                 }
+            }
+            // With or without chapters, the transcript is final now.
+            if hook_pending {
+                hook::run(&dir);
             }
         });
     }

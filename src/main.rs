@@ -9,6 +9,7 @@ mod bar_widget;
 mod chapters;
 mod diarize;
 mod export;
+mod hook;
 mod ipc;
 mod meeting;
 mod models;

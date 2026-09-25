@@ -100,19 +100,23 @@ pub fn configured() -> String {
     if let Some(name) = OVERRIDE.lock().unwrap().clone() {
         return name;
     }
+    config_value("model").unwrap_or_else(|| DEFAULT.to_owned())
+}
+
+/// A `key = "value"` line from `config.toml`, None when missing or empty.
+pub fn config_value(name: &str) -> Option<String> {
     std::fs::read_to_string(config_file())
         .ok()
         .and_then(|text| {
             text.lines().find_map(|line| {
                 let (key, value) = line.split_once('=')?;
-                (key.trim() == "model").then(|| {
+                (key.trim() == name).then(|| {
                     let value = value.split('#').next().unwrap_or("");
                     value.trim().trim_matches('"').to_owned()
                 })
             })
         })
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| DEFAULT.to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn known(name: &str) -> Option<&'static Model> {
