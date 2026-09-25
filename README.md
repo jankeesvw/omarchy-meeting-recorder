@@ -213,6 +213,14 @@ The default build transcribes on the CPU, which is fast enough on a modern machi
 cargo build --release --features vulkan
 ```
 
+On an NVIDIA card, whisper.cpp's CUDA backend is another option. It needs the CUDA toolkit (`cuda` on Arch) with `nvcc` on the `PATH`, and a toolkit recent enough for your GCC. Building the CUDA kernels takes a while; setting `CUDAARCHS` to your card's compute capability (`86` for an RTX 30 series, `89` for an RTX 40 series) builds only those:
+
+```bash
+CUDAARCHS=86 cargo build --release --features cuda
+```
+
+With the CUDA build, the two minutes of the bench's `call` case transcribe in about 13 seconds on a laptop RTX 2050, against about five minutes on its 22-thread CPU.
+
 The window floats nicely with a Hyprland rule on its class:
 
 ```lua

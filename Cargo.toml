@@ -19,3 +19,6 @@ default = []
 # GPU transcription through whisper.cpp's Vulkan backend. Needs the Vulkan
 # headers (`vulkan-headers` on Arch) and glslc (`shaderc`) to build.
 vulkan = ["whisper-rs/vulkan"]
+# GPU transcription through whisper.cpp's CUDA backend, for NVIDIA cards.
+# Needs the CUDA toolkit (nvcc, cuBLAS) to build and the NVIDIA driver to run.
+cuda = ["whisper-rs/cuda"]

@@ -811,7 +811,7 @@ fn load_whisper(events: &Events, abort: &Abort) -> Result<WhisperContext, String
     emit(events, Event::Progress(0.0));
     whisper_rs::install_logging_hooks();
     let mut context_params = WhisperContextParameters::default();
-    context_params.use_gpu(cfg!(feature = "vulkan"));
+    context_params.use_gpu(cfg!(any(feature = "vulkan", feature = "cuda")));
     // Word times aligned on the attention heads (DTW): the plain token times
     // drift by up to a second, too much to tell where one speaker takes over.
     // A model file of unknown kind gets plain token times.
