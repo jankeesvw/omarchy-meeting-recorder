@@ -867,6 +867,17 @@ fn run_whisper(
     params.set_suppress_blank(true);
     params.set_suppress_nst(true);
     params.set_no_speech_thold(0.6);
+    // By default whisper feeds each segment's text back in as context for the
+    // next one, and on a long recording that's what lets it lock onto a
+    // sentence and repeat it: the repeated text keeps reinforcing itself as
+    // its own context. Omavoice measured this on a 90-minute meetup
+    // recording — one sentence repeated 7 times in a 6.5-minute stretch with
+    // context on, once with it off — so every segment here is decoded on its
+    // own. `is_hallucination` and `is_stock_phrase` below catch a different
+    // failure: whisper inventing subtitle stock phrases ("Thank you.") over
+    // silence. This stops loops inside real speech, which those never see
+    // because there's no silence to flag.
+    params.set_no_context(true);
     // Word times, so a segment can be split where the speaker changes.
     params.set_token_timestamps(true);
     params.set_split_on_word(true);
