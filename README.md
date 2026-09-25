@@ -239,6 +239,16 @@ omarchy plugin enable jankeesvw.meeting-recorder --section right
 
 This also recovers a failed first-start “Add to Bar” attempt in version 1.0.2, which leaves the widget linked but does not offer again on restart.
 
+## Meeting title detection
+
+In **Preferences** (gear button or **Ctrl+,**), enable **Detect meeting title** to suggest the name of an open Zoom or Google Meet meeting. This is off by default and never starts a recording. A name you type takes precedence, and recordings already in progress are not renamed. If multiple meeting windows are detected, no name is guessed.
+
+Detection reads Hyprland window metadata. Supported hints include dedicated Chromium Zoom web apps, native Zoom meeting windows, dedicated Google Meet web apps, and Google Meet tabs whose browser window title identifies Meet. Only the selected tab of each browser window is visible to Hyprland; hidden tabs cannot be inspected. Known home, join, waiting-room and ended titles are filtered, but a titled preview can still look like a meeting.
+
+Some providers expose only a generic title or a meeting code. Those identify the provider but do not supply a meeting name; the recorder keeps your manual name or its usual timestamp default. No calendar or browser account access is used.
+
+Run `omarchy-meeting-recorder detect-meetings` to inspect the detected providers and available titles without recording.
+
 ## Command line
 
 | Command | What it does |

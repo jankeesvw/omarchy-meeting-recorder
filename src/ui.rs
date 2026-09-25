@@ -84,6 +84,7 @@ pub fn run(open: Option<&str>) -> glib::ExitCode {
             }
         });
         app.set_accels_for_action("win.compact", &["<Control>m"]);
+        app.set_accels_for_action("win.preferences", &["<Control>comma"]);
         app.set_accels_for_action("window.close", &["<Control>w"]);
         app.set_accels_for_action("app.quit", &["<Control>q"]);
     });
@@ -131,6 +132,7 @@ struct Recorder {
     compact_action: gio::SimpleAction,
     compact_button: gtk::Button,
     title_row: adw::EntryRow,
+    suggested_title: RefCell<Option<String>>,
     format_row: adw::ComboRow,
     language_row: adw::ComboRow,
     animation: TranscribeAnimation,
@@ -232,6 +234,12 @@ impl Recorder {
             .action_name("win.compact")
             .build();
         header.pack_start(&compact_button);
+        let preferences_button = gtk::Button::builder()
+            .icon_name("emblem-system-symbolic")
+            .tooltip_text("Preferences (Ctrl+,)")
+            .action_name("win.preferences")
+            .build();
+        header.pack_end(&preferences_button);
         view.add_top_bar(&header);
         // Under the header bar, full width, while the speech model still has
         // to be downloaded.
@@ -598,6 +606,7 @@ impl Recorder {
             compact_action,
             compact_button,
             title_row,
+            suggested_title: RefCell::default(),
             format_row,
             language_row,
             animation,
@@ -661,6 +670,15 @@ impl Recorder {
         });
         recorder.connect_signals(&open_button, &new_button, &quit_action);
         let weak = Rc::downgrade(&recorder);
+        let preferences_action = gio::SimpleAction::new("preferences", None);
+        preferences_action.connect_activate(move |_, _| {
+            if let Some(r) = weak.upgrade() {
+                r.show_preferences();
+            }
+        });
+        recorder.window.add_action(&preferences_action);
+        recorder.follow_meeting_title();
+        let weak = Rc::downgrade(&recorder);
         glib::spawn_future_local(async move {
             while let Ok(command) = commands_rx.recv().await {
                 let Some(r) = weak.upgrade() else { break };
@@ -681,6 +699,59 @@ impl Recorder {
         });
         recorder.render();
         recorder
+    }
+
+    fn show_preferences(self: &Rc<Self>) {
+        let dialog = adw::PreferencesDialog::new();
+        dialog.set_title("Preferences");
+        let page = adw::PreferencesPage::new();
+        let group = adw::PreferencesGroup::builder()
+            .title("Meeting detection")
+            .description("Supports Zoom and Google Meet on Hyprland. A meeting name must be available in the window title. Browser tabs are detectable only while visible in their browser window.")
+            .build();
+        let title_row = adw::SwitchRow::builder()
+            .title("Detect meeting title")
+            .subtitle("Suggest a name before recording. Names you type take precedence.")
+            .active(settings::auto_detect_title())
+            .build();
+        title_row.connect_active_notify(|row| settings::set_auto_detect_title(row.is_active()));
+        group.add(&title_row);
+        page.add(&group);
+        dialog.add(&page);
+        dialog.present(Some(&self.window));
+    }
+
+    fn apply_meeting_title(&self, title: Option<&str>) {
+        if self.state.get() != State::Idle || !settings::auto_detect_title() {
+            return;
+        }
+        let next = crate::meeting_detection::suggested_title(
+            self.title_row.text().as_str(),
+            self.suggested_title.borrow().as_deref(),
+            title,
+        );
+        if let Some(next) = next {
+            self.title_row.set_text(&next);
+            *self.suggested_title.borrow_mut() = (!next.is_empty()).then_some(next);
+        }
+    }
+
+    fn follow_meeting_title(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            loop {
+                glib::timeout_future_seconds(2).await;
+                let Some(r) = weak.upgrade() else { break };
+                if r.state.get() != State::Idle || !settings::auto_detect_title() {
+                    continue;
+                }
+                let result = gio::spawn_blocking(crate::meeting_detection::clients).await;
+                if let Ok(Ok(clients)) = result {
+                    let detected = crate::meeting_detection::unique(&clients);
+                    r.apply_meeting_title(detected.as_ref().and_then(|m| m.title.as_deref()));
+                }
+            }
+        });
     }
 
     fn connect_signals(
@@ -1699,6 +1770,7 @@ impl Recorder {
         *self.result_dir.borrow_mut() = None;
         *self.manifest.borrow_mut() = None;
         self.title_row.set_text("");
+        *self.suggested_title.borrow_mut() = None;
         self.timer.set_label("00:00");
         self.compact_timer.set_label("00:00");
         self.set_state(State::Idle);

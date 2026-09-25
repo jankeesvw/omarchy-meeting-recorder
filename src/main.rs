@@ -12,6 +12,7 @@ mod diarize;
 mod export;
 mod ipc;
 mod meeting;
+mod meeting_detection;
 mod models;
 mod nemotron;
 mod player;
@@ -28,6 +29,7 @@ pub const APP_NAME: &str = "omarchy-meeting-recorder";
 fn main() -> glib::ExitCode {
     match std::env::args().nth(1).as_deref() {
         None => ui::run(None),
+        Some("detect-meetings") => meeting_detection::check(),
         Some("watch") => {
             ipc::watch();
             glib::ExitCode::SUCCESS
@@ -58,6 +60,7 @@ fn main() -> glib::ExitCode {
             println!("  stop          stop the running recording (for a keybinding)");
             println!("  compact       switch the recording window between full and compact");
             println!("  pause         pause or resume the running recording");
+            println!("  detect-meetings  print detected Zoom / Google Meet window hints");
             println!("  watch         stream the recorder state as NDJSON, for the bar widget");
             println!("  transcribe    transcribe two tracks and print the transcript as Markdown");
             println!(
