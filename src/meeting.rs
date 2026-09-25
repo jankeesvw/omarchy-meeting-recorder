@@ -283,7 +283,16 @@ fn from_folder(dir: &Path) -> Option<Manifest> {
 
 #[cfg(test)]
 mod tests {
-    use super::relabel;
+    use super::{relabel, side_of};
+
+    #[test]
+    fn labels_tell_the_side_and_number() {
+        assert_eq!(side_of("You"), Some(("You", 0)));
+        assert_eq!(side_of("You 2"), Some(("You", 2)));
+        assert_eq!(side_of("Remote 3"), Some(("Remote", 3)));
+        assert_eq!(side_of("Speaker 1"), None);
+        assert_eq!(side_of("Youri"), None);
+    }
 
     const MD: &str = "# Weekly\n\n**[00:01] You:** Hi.\n\n**[00:03] Remote:** You: said hi.\n";
 
