@@ -2,7 +2,7 @@
 
 pkgname=omarchy-meeting-recorder-bin
 _name=omarchy-meeting-recorder
-pkgver=1.3.0
+pkgver=1.4.0
 pkgrel=1
 pkgdesc="Meeting Recorder for Omarchy: record the mic and the computer audio, transcribed on your own machine with speakers, chapters and a player"
 arch=('x86_64')
@@ -16,7 +16,7 @@ conflicts=("$_name")
 install="$_name.install"
 options=('!debug')
 source_x86_64=("$url/releases/download/v$pkgver/$_name-$pkgver-x86_64-linux.tar.gz")
-sha256sums_x86_64=('8450fe9d7dc8380483d3691797f809770c2d5e0f4372887bc1afc0d92e6ad9e3')
+sha256sums_x86_64=('d8358178d11e01f5a34a69839dfcf497dc193163b489107076cd62b34472c639')
 
 package() {
   cd "$_name-$pkgver"

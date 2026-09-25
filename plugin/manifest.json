@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "jankeesvw.meeting-recorder",
   "name": "Meeting Recorder",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "author": "Jankees van Woezik",
   "description": "Shows a live waveform of your mic and the computer audio while Meeting Recorder is recording.",
   "kinds": ["bar-widget"],

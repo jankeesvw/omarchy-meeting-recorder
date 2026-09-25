@@ -1,6 +1,6 @@
 pkgbase = omarchy-meeting-recorder-bin
 	pkgdesc = Meeting Recorder for Omarchy: record the mic and the computer audio, transcribed on your own machine with speakers, chapters and a player
-	pkgver = 1.3.0
+	pkgver = 1.4.0
 	pkgrel = 1
 	url = https://github.com/jankeesvw/omarchy-meeting-recorder
 	install = omarchy-meeting-recorder.install
@@ -17,12 +17,13 @@ pkgbase = omarchy-meeting-recorder-bin
 	depends = glibc
 	depends = libpulse
 	depends = ffmpeg
+	depends = vulkan-icd-loader
 	optdepends = quickshell: the bar widget, part of every Omarchy install
 	optdepends = perl-file-mimeinfo: open .meeting-recorder files with xdg-open, not only from Nautilus
 	provides = omarchy-meeting-recorder
 	conflicts = omarchy-meeting-recorder
 	options = !debug
-	source_x86_64 = https://github.com/jankeesvw/omarchy-meeting-recorder/releases/download/v1.3.0/omarchy-meeting-recorder-1.3.0-x86_64-linux.tar.gz
-	sha256sums_x86_64 = 8450fe9d7dc8380483d3691797f809770c2d5e0f4372887bc1afc0d92e6ad9e3
+	source_x86_64 = https://github.com/jankeesvw/omarchy-meeting-recorder/releases/download/v1.4.0/omarchy-meeting-recorder-1.4.0-x86_64-linux.tar.gz
+	sha256sums_x86_64 = d8358178d11e01f5a34a69839dfcf497dc193163b489107076cd62b34472c639
 
 pkgname = omarchy-meeting-recorder-bin
