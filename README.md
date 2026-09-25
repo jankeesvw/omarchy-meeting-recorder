@@ -172,7 +172,7 @@ The app looks for `ggml-<model>.bin`, for instance `ggml-large-v3-turbo.bin`, in
 
 Your own scripts, picked from the **Actions** menu on the done page: store the transcript in Obsidian, publish it, mail it around. Each is a name and a command in `~/.config/omarchy-meeting-recorder/config.toml`; the command gets the meeting folder and the meeting's details, and what it prints last shows up in the app, with an **Open** button for a link.
 
-<p align="center"><img src="screenshots/actions.webp" alt="The done page with the Actions menu open, showing Store transcript in Obsidian and Publish as public transcript" width="700"></p>
+<p align="center"><img src="screenshots/actions-menu.webp" alt="Clicking Actions on the done page: the view zooms in on the menu with Store transcript in Obsidian and Publish as public transcript" width="700"></p>
 
 [docs/actions.md](docs/actions.md) explains it all, with two complete examples (Store transcript in Obsidian, and Publish as public transcript, where your default agent writes the summary) and a section for your agent, so you can ask it to write actions for you.
 
