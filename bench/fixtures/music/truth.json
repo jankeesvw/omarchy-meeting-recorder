@@ -1,0 +1,62 @@
+{
+ "kind": "call",
+ "about": "The other side talks with music playing in the background.",
+ "truth": [
+  {
+   "speaker": "You",
+   "side": "mic",
+   "start": 0.5,
+   "end": 4.26,
+   "text": "Can you hear me? I think you have some music on in the background."
+  },
+  {
+   "speaker": "Cori",
+   "side": "computer",
+   "start": 4.86,
+   "end": 11.35,
+   "text": "Sorry, that's the radio in the kitchen. I can't turn it off right now, is it very loud?"
+  },
+  {
+   "speaker": "You",
+   "side": "mic",
+   "start": 11.75,
+   "end": 15.6,
+   "text": "It's fine, I can understand you. Let's keep it short then."
+  },
+  {
+   "speaker": "Cori",
+   "side": "computer",
+   "start": 16.1,
+   "end": 23.48,
+   "text": "Sure. The main thing is the new laptop. Omarchy installed in under a minute, but the fingerprint reader doesn't work yet."
+  },
+  {
+   "speaker": "You",
+   "side": "mic",
+   "start": 23.88,
+   "end": 29.71,
+   "text": "Okay, I'll ask the hardware team today. They fixed the same reader on the other model last week."
+  },
+  {
+   "speaker": "Cori",
+   "side": "computer",
+   "start": 30.21,
+   "end": 34.52,
+   "text": "Perfect. And could you send me the link to the manual page about it?"
+  },
+  {
+   "speaker": "You",
+   "side": "mic",
+   "start": 34.82,
+   "end": 36.94,
+   "text": "Of course. Anything else?"
+  },
+  {
+   "speaker": "Cori",
+   "side": "computer",
+   "start": 37.34,
+   "end": 41.47,
+   "text": "No, that was it. Thanks, and sorry again about the radio."
+  }
+ ]
+}

@@ -1,0 +1,26 @@
+You|0.5|Okay, I think everyone is here. This is the release call for the new theme picker.
+Anna|0.6|Great. I can start with the beta, if that works for everyone.
+You|0.4|Sure, go ahead.
+Anna|0.5|So the beta went out on Monday to about two hundred people. Switching themes now takes under a second, even on the old ThinkPad.
+Ben|-0.8|Yeah.
+Anna|0.3|The one thing still open is the preview on high resolution screens. The thumbnails look blurry at scale two.
+Ben|0.4|I looked at that yesterday. We render them at the wrong size. I can fix it today, it's one line in the shell.
+Carla|-1.2|Wait, is that the same bug we had with the wallpapers last month?
+Ben|0.3|Similar, but not the same code. The wallpaper one was the cache.
+You|0.5|How long do you think the fix takes, Ben?
+Ben|0.4|Half a day, maybe less. Then Anna can test it tomorrow morning.
+Anna|0.3|Tomorrow morning works for me.
+Carla|0.6|Can I add something about the installer? We changed the second screen and the numbers look really good.
+You|-0.9|Oh nice, tell us.
+Carla|0.3|Installs finish in forty seconds now, down from ninety. People stop at the disk encryption step much less now that we explain why it matters.
+Anna|-1.0|That is a big jump.
+Carla|0.3|It is. I want to do the same for the keyboard layout question next week.
+You|0.5|Let's do that. Ben, does that change anything on your side?
+Ben|0.4|No, it's only text and one picture, Carla can do that without me.
+Ben|0.8|One more thing. The plugin review for the weather widget is still pending. It has been four days now.
+You|-1.1|Four days is long. Did we hear anything back?
+Ben|0.3|Nothing yet. I'll ping them this afternoon.
+Anna|0.5|If it's not merged by Thursday we should ship the theme picker without it.
+You|0.4|Agreed. So to sum up: Ben fixes the blurry previews today, Anna tests them tomorrow, Carla starts on the keyboard question, and Ben chases the plugin review.
+Carla|0.4|Sounds good.
+Anna|-0.4|Perfect, thanks everyone.

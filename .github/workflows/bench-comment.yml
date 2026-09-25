@@ -1,0 +1,75 @@
+name: Bench comment
+
+# Posts the scores of a "Bench" run on its pull request, as one comment that
+# every later run updates. It runs in this repository with write access, so it
+# never runs code from the pull request: it only reads the scores the bench
+# left behind, as data, and checks that they belong to that pull request.
+
+on:
+  workflow_run:
+    workflows: [Bench]
+    types: [completed]
+
+permissions:
+  pull-requests: write
+  actions: read
+
+jobs:
+  comment:
+    if: ${{ github.event.workflow_run.event == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bench-comment
+          path: bench-comment
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const run = context.payload.workflow_run;
+            const read = (f) => fs.existsSync(f) ? fs.readFileSync(f, 'utf8').trim() : '';
+            const number = parseInt(read('bench-comment/pr.txt'), 10);
+            if (!Number.isInteger(number)) return;
+            // Only a pull request whose head is the commit that was benched.
+            const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: number });
+            if (pr.head.sha !== run.head_sha) return core.info('Pull request moved on; not commenting.');
+
+            let results = null;
+            try { results = JSON.parse(read('bench-comment/bench-results.json')); } catch (e) {}
+            const clean = (s) => String(s).replace(/[^\w .,:%/()'-]/g, '').slice(0, 200);
+            const pct = (v) => typeof v === 'number' ? (v * 100).toFixed(1) + '%' : '';
+            const columns = [['found', pct], ['side', pct], ['person', pct], ['leaked', String],
+                             ['lines', String], ['speakers', clean], ['speaker error', pct], ['seconds', String]];
+
+            const passed = run.conclusion === 'success';
+            let body = '<!-- bench -->\n';
+            body += `### Bench ${passed ? 'passed' : 'failed'}\n\n`;
+            if (results && results.cases) {
+              const cases = Object.entries(results.cases);
+              const shown = columns.filter(([c]) => cases.some(([, r]) => c in r));
+              body += '| case | ' + shown.map(([c]) => c).join(' | ') + ' |\n';
+              body += '|---|' + shown.map(() => '---:').join('|') + '|\n';
+              for (const [name, r] of cases) {
+                const cells = shown.map(([c, f]) => c in r ? f(r[c]) : '');
+                body += `| ${clean(name)}${r.error ? ' (error)' : ''} | ${cells.join(' | ')} |\n`;
+              }
+              if (results.failures && results.failures.length) {
+                body += '\nBelow the thresholds in `bench/thresholds.json`:\n\n';
+                body += results.failures.map((f) => `- ${clean(f)}`).join('\n') + '\n';
+              }
+            } else {
+              body += 'No scores: the build or the bench stopped before the end.\n';
+            }
+            body += `\n[Run](${run.html_url}) on ${run.head_sha.slice(0, 7)}. Columns are explained in [bench/README.md](https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/bench/README.md).\n`;
+
+            const comments = await github.paginate(github.rest.issues.listComments, { ...context.repo, issue_number: number });
+            const mine = comments.find((c) => c.user.type === 'Bot' && c.body.startsWith('<!-- bench -->'));
+            if (mine) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: mine.id, body });
+            } else {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: number, body });
+            }

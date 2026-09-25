@@ -1,3 +1,4 @@
 /target
 # The full screenshot and video library; only the images the README uses live in screenshots/.
 /media/
+/bench/.cache/

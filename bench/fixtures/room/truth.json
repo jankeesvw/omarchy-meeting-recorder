@@ -1,0 +1,125 @@
+{
+ "kind": "call",
+ "about": "Two people share your mic, two people on the other side.",
+ "truth": [
+  {
+   "speaker": "You",
+   "side": "mic",
+   "start": 0.5,
+   "end": 5.22,
+   "text": "Morning. Dave is here with me in the office, so there are two of us on this side."
+  },
+  {
+   "speaker": "Dave",
+   "side": "mic",
+   "start": 5.62,
+   "end": 6.89,
+   "text": "Hi everyone."
+  },
+  {
+   "speaker": "Kristin",
+   "side": "computer",
+   "start": 7.39,
+   "end": 11.6,
+   "text": "Hi Dave, good to hear you. Shall we start with the plugin directory?"
+  },
+  {
+   "speaker": "You",
+   "side": "mic",
+   "start": 12.0,
+   "end": 17.54,
+   "text": "Yes please. We added search yesterday, and it already finds all two thousand plugins."
+  },
+  {
+   "speaker": "Norman",
+   "side": "computer",
+   "start": 18.14,
+   "end": 23.16,
+   "text": "I saw it. It's fast, but the install button still copies the old command."
+  },
+  {
+   "speaker": "Dave",
+   "side": "mic",
+   "start": 22.46,
+   "end": 26.06,
+   "text": "That's on me, I'll fix it after this call."
+  },
+  {
+   "speaker": "Kristin",
+   "side": "computer",
+   "start": 26.46,
+   "end": 31.57,
+   "text": "Great. Then the second thing is the newsletter. It goes out on Friday."
+  },
+  {
+   "speaker": "You",
+   "side": "mic",
+   "start": 32.07,
+   "end": 34.18,
+   "text": "Who is writing the intro this time?"
+  },
+  {
+   "speaker": "Dave",
+   "side": "mic",
+   "start": 34.48,
+   "end": 39.59,
+   "text": "I can do it. I have a draft about running Omarchy on a potato PC."
+  },
+  {
+   "speaker": "Norman",
+   "side": "computer",
+   "start": 39.09,
+   "end": 41.73,
+   "text": "Can you add a screenshot of the new lock screen?"
+  },
+  {
+   "speaker": "Dave",
+   "side": "mic",
+   "start": 42.03,
+   "end": 45.38,
+   "text": "Sure, I'll take one this afternoon."
+  },
+  {
+   "speaker": "You",
+   "side": "mic",
+   "start": 45.88,
+   "end": 49.02,
+   "text": "Good. Kristin, anything from the forum this week?"
+  },
+  {
+   "speaker": "Kristin",
+   "side": "computer",
+   "start": 49.42,
+   "end": 56.45,
+   "text": "Only one thing. Three people asked how to go back to the default theme. We should make that easier to find."
+  },
+  {
+   "speaker": "Norman",
+   "side": "computer",
+   "start": 56.85,
+   "end": 59.94,
+   "text": "I can add it to the theme menu, right at the top."
+  },
+  {
+   "speaker": "You",
+   "side": "mic",
+   "start": 59.34,
+   "end": 61.03,
+   "text": "Yes, let's do that."
+  },
+  {
+   "speaker": "Dave",
+   "side": "mic",
+   "start": 61.33,
+   "end": 64.98,
+   "text": "Then I think we're done. Thanks everyone."
+  },
+  {
+   "speaker": "Kristin",
+   "side": "computer",
+   "start": 64.68,
+   "end": 65.89,
+   "text": "Thanks, bye."
+  }
+ ]
+}

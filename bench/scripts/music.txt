@@ -1,0 +1,8 @@
+You|0.5|Can you hear me? I think you have some music on in the background.
+Cori|0.6|Sorry, that's the radio in the kitchen. I can't turn it off right now, is it very loud?
+You|0.4|It's fine, I can understand you. Let's keep it short then.
+Cori|0.5|Sure. The main thing is the new laptop. Omarchy installed in under a minute, but the fingerprint reader doesn't work yet.
+You|0.4|Okay, I'll ask the hardware team today. They fixed the same reader on the other model last week.
+Cori|0.5|Perfect. And could you send me the link to the manual page about it?
+You|0.3|Of course. Anything else?
+Cori|0.4|No, that was it. Thanks, and sorry again about the radio.
