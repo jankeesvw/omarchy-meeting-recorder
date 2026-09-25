@@ -190,7 +190,8 @@ The audio, the transcript and everything else stay on your computer. The only th
 - PipeWire with `parec` and `pacat` (both from `libpulse`), for recording and for playing a meeting back
 - `ffmpeg` with libopus
 - GTK 4 and libadwaita 1.6 or newer
-- Rust and CMake, to build it (whisper.cpp is compiled along)
+- Rust, CMake, Vulkan headers and `glslc`, to build it (whisper.cpp is compiled along)
+- Vulkan loader at runtime; a compatible Vulkan GPU driver enables accelerated transcription
 - Optional: a default agent in Omarchy for chapters
 
 ## Build from source
@@ -207,11 +208,23 @@ xdg-mime default omarchy-meeting-recorder.desktop application/x-omarchy-meeting
 
 The last three lines register the `.meeting-recorder` file type, so a double-click opens the meeting in the app. File managers that go through GIO (Nautilus) pick that up right away; restart Nautilus if it still opens the file as text. `xdg-open`, which most launchers and terminals use on Hyprland, looks at the contents with `file` instead and sees JSON, so it opens the file in your text editor. Install `perl-file-mimeinfo` (`yay -S perl-file-mimeinfo`) and `xdg-open` goes by the registered type too.
 
-The default build transcribes on the CPU, which is fast enough on a modern machine: a few seconds for a short call. For the GPU, build with whisper.cpp's Vulkan backend. That needs the Vulkan headers and `glslc` (`vulkan-headers` and `shaderc` on Arch):
+The default build includes whisper.cpp's Vulkan backend and uses a compatible GPU when available. With no usable GPU it falls back to the CPU. GPU support accelerates speech-to-text; speaker identification still runs on the CPU. Processing time depends on the model, audio and hardware, and can be substantial for long recordings on CPU.
+
+On Arch, the default build needs `vulkan-headers` and `shaderc`. The installed binary needs `vulkan-icd-loader`, plus the Vulkan driver appropriate for your GPU to use acceleration. Existing CPU-only release binaries do not gain GPU support from installing a driver: rebuild or install a release compiled with Vulkan enabled. Restart the recorder after replacing its binary, once any recording or processing has finished.
+
+For a CPU-only binary without Vulkan build or runtime dependencies:
 
 ```bash
-cargo build --release --features vulkan
+cargo build --release --no-default-features
 ```
+
+To check which support was compiled into a binary:
+
+```bash
+omarchy-meeting-recorder --version
+```
+
+This reports build support, not whether a particular transcription actually ran on a GPU. The `vulkan` feature remains available explicitly for build scripts using `--no-default-features --features vulkan`.
 
 The window floats nicely with a Hyprland rule on its class:
 

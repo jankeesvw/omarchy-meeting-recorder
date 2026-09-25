@@ -26,7 +26,7 @@ jobs:
       CARGO_HOME: /cache/cargo
     steps:
       - name: Install build and runtime dependencies
-        run: pacman -Syu --noconfirm --needed base-devel git rust cmake clang gtk4 libadwaita ffmpeg libpulse python
+        run: pacman -Syu --noconfirm --needed base-devel git rust cmake clang gtk4 libadwaita ffmpeg libpulse python vulkan-headers shaderc vulkan-icd-loader
 
       - uses: actions/checkout@v4
 
@@ -54,6 +54,9 @@ jobs:
 
       - name: Build
         run: cargo build --release
+
+      - name: Check CPU-only build
+        run: cargo check --release --no-default-features
 
       - name: Unit tests
         run: cargo test --release

@@ -28,6 +28,15 @@ pub const APP_NAME: &str = "omarchy-meeting-recorder";
 fn main() -> glib::ExitCode {
     match std::env::args().nth(1).as_deref() {
         None => ui::run(None),
+        Some("--version" | "-V") => {
+            let backend = if cfg!(feature = "vulkan") {
+                "Vulkan support; CPU fallback"
+            } else {
+                "CPU-only"
+            };
+            println!("{APP_NAME} {} ({backend})", env!("CARGO_PKG_VERSION"));
+            glib::ExitCode::SUCCESS
+        }
         Some("watch") => {
             ipc::watch();
             glib::ExitCode::SUCCESS

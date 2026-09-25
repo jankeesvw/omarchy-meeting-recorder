@@ -8,7 +8,7 @@ pkgdesc="Meeting Recorder for Omarchy: record the mic and the computer audio, tr
 arch=('x86_64')
 url="https://github.com/jankeesvw/omarchy-meeting-recorder"
 license=('MIT')
-depends=('gtk4' 'libadwaita' 'glib2' 'pango' 'cairo' 'graphene' 'libgcc' 'libstdc++' 'glibc' 'libpulse' 'ffmpeg')
+depends=('gtk4' 'libadwaita' 'glib2' 'pango' 'cairo' 'graphene' 'libgcc' 'libstdc++' 'glibc' 'libpulse' 'ffmpeg' 'vulkan-icd-loader')
 optdepends=('quickshell: the bar widget, part of every Omarchy install'
             'perl-file-mimeinfo: open .meeting-recorder files with xdg-open, not only from Nautilus')
 provides=("$_name")
