@@ -36,7 +36,7 @@ pub fn should_offer() -> bool {
             || std::fs::read_link(target()).is_ok_and(|path| path == std::path::Path::new(SOURCE)));
     // Already on the bar, put there by hand or by an earlier version: nothing
     // to offer, now or later.
-    if offer && enabled(&run) == Some(true) {
+    if offer && enabled(run) == Some(true) {
         settings::set_bar_widget_offered();
         return false;
     }
@@ -44,7 +44,7 @@ pub fn should_offer() -> bool {
 }
 
 /// Whether the shell has the widget on the bar; None when the shell does not answer.
-fn enabled(run: &impl Fn(&str, &[&str]) -> Result<String, String>) -> Option<bool> {
+fn enabled(mut run: impl FnMut(&str, &[&str]) -> Result<String, String>) -> Option<bool> {
     let output = run("omarchy-shell", &["shell", "listPlugins"]).ok()?;
     let plugins: Vec<serde_json::Value> = serde_json::from_str(&output).ok()?;
     Some(plugins.iter().any(|plugin| {
@@ -98,8 +98,15 @@ fn enable(
             .find(|plugin| plugin["id"].as_str() == Some(ID))
         {
             // Already on the bar: enabling again would move it or fail.
-            if plugin["enabled"].as_bool() != Some(true) {
-                run("omarchy", &["plugin", "enable", ID, "--section", "right"])?;
+            if plugin["enabled"].as_bool() != Some(true)
+                && let Err(error) = run("omarchy", &["plugin", "enable", ID, "--section", "right"])
+            {
+                // Right after a rescan the shell can take longer to enable a
+                // plugin than omarchy-shell waits for its answer, and puts it
+                // on the bar anyway. What the shell reports is the answer.
+                if !reached_the_bar(&mut run, &mut sleep) {
+                    return Err(error);
+                }
             }
             return Ok(());
         }
@@ -112,15 +119,33 @@ fn enable(
     ))
 }
 
+/// Whether the widget shows up on the bar within ten seconds or so. In #12 it
+/// was there about four seconds after the enable gave up.
+fn reached_the_bar(
+    mut run: impl FnMut(&str, &[&str]) -> Result<String, String>,
+    mut sleep: impl FnMut(Duration),
+) -> bool {
+    for attempt in 0..20 {
+        if enabled(&mut run) == Some(true) {
+            return true;
+        }
+        if attempt < 19 {
+            sleep(Duration::from_millis(500));
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    fn scenario(replies: Vec<Result<&str, &str>>) -> (Result<(), String>, Vec<String>, usize) {
+    /// Runs `enable` against canned replies; returns the calls and the time slept.
+    fn scenario(replies: Vec<Result<&str, &str>>) -> (Result<(), String>, Vec<String>, Duration) {
         let mut replies: VecDeque<_> = replies.into();
         let mut calls = Vec::new();
-        let mut sleeps = 0;
+        let mut slept = Duration::ZERO;
         let result = enable(
             |program, args| {
                 calls.push(format!("{program} {}", args.join(" ")));
@@ -130,17 +155,41 @@ mod tests {
                     .map(str::to_owned)
                     .map_err(str::to_owned)
             },
-            |duration| {
-                assert_eq!(duration, Duration::from_millis(100));
-                sleeps += 1;
-            },
+            |duration| slept += duration,
         );
         assert!(replies.is_empty());
-        (result, calls, sleeps)
+        (result, calls, slept)
     }
 
     const FOUND: &str = r#"[{"id":"jankeesvw.meeting-recorder","enabled":false}]"#;
     const ON_THE_BAR: &str = r#"[{"id":"jankeesvw.meeting-recorder","enabled":true}]"#;
+    const NOT_RESPONDING: &str = "omarchy: omarchy-plugin-enable: omarchy-shell is not responding";
+    const ENABLE: &str = "omarchy plugin enable jankeesvw.meeting-recorder --section right";
+
+    #[test]
+    fn an_enable_that_times_out_but_lands_counts_as_added() {
+        let (result, calls, slept) = scenario(vec![
+            Ok(""),
+            Ok(FOUND),
+            Err(NOT_RESPONDING),
+            Err(NOT_RESPONDING),
+            Ok(FOUND),
+            Ok(ON_THE_BAR),
+        ]);
+        assert_eq!(result, Ok(()));
+        assert_eq!(slept, Duration::from_secs(1));
+        assert_eq!(calls.iter().filter(|call| *call == ENABLE).count(), 1);
+    }
+
+    #[test]
+    fn an_enable_that_never_lands_keeps_its_error() {
+        let mut replies = vec![Ok(""), Ok(FOUND), Err(NOT_RESPONDING)];
+        replies.extend(vec![Ok(FOUND); 20]);
+        let (result, calls, slept) = scenario(replies);
+        assert_eq!(result, Err(NOT_RESPONDING.to_owned()));
+        assert_eq!(slept, Duration::from_millis(9500));
+        assert_eq!(calls.iter().filter(|call| *call == ENABLE).count(), 1);
+    }
 
     #[test]
     fn a_widget_already_on_the_bar_is_left_alone() {
@@ -167,7 +216,7 @@ mod tests {
 
     #[test]
     fn waits_for_discovery_before_enabling() {
-        let (result, calls, sleeps) = scenario(vec![
+        let (result, calls, slept) = scenario(vec![
             Ok(""),
             Ok("[]"),
             Ok(r#"[{"id":"other.plugin"}]"#),
@@ -175,7 +224,7 @@ mod tests {
             Ok("Enabled"),
         ]);
         assert_eq!(result, Ok(()));
-        assert_eq!(sleeps, 2);
+        assert_eq!(slept, Duration::from_millis(200));
         assert_eq!(
             calls,
             [
@@ -190,18 +239,18 @@ mod tests {
 
     #[test]
     fn already_discovered_plugin_needs_no_sleep() {
-        let (result, _, sleeps) = scenario(vec![Ok(""), Ok(FOUND), Ok("Enabled")]);
+        let (result, _, slept) = scenario(vec![Ok(""), Ok(FOUND), Ok("Enabled")]);
         assert_eq!(result, Ok(()));
-        assert_eq!(sleeps, 0);
+        assert_eq!(slept, Duration::ZERO);
     }
 
     #[test]
     fn missing_plugin_times_out_without_enabling() {
         let mut replies = vec![Ok("")];
         replies.extend(vec![Ok("[]"); 50]);
-        let (result, calls, sleeps) = scenario(replies);
+        let (result, calls, slept) = scenario(replies);
         assert!(result.unwrap_err().contains("did not discover"));
-        assert_eq!(sleeps, 49);
+        assert_eq!(slept, Duration::from_millis(4900));
         assert!(calls.iter().all(|call| call.starts_with("omarchy-shell ")));
     }
 
@@ -210,22 +259,21 @@ mod tests {
         for replies in [
             vec![Err("shell unavailable")],
             vec![Ok(""), Err("shell unavailable")],
-            vec![Ok(""), Ok(FOUND), Err("invalid placement")],
         ] {
             let expected = replies.last().unwrap().as_ref().unwrap_err().to_string();
-            let (result, _, sleeps) = scenario(replies);
+            let (result, _, slept) = scenario(replies);
             assert_eq!(result, Err(expected));
-            assert_eq!(sleeps, 0);
+            assert_eq!(slept, Duration::ZERO);
         }
     }
 
     #[test]
     fn malformed_plugin_list_is_reported_without_enabling() {
         for output in ["not JSON", "{}"] {
-            let (result, calls, sleeps) = scenario(vec![Ok(""), Ok(output)]);
+            let (result, calls, slept) = scenario(vec![Ok(""), Ok(output)]);
             assert!(result.unwrap_err().contains("Could not read"));
             assert_eq!(calls.len(), 2);
-            assert_eq!(sleeps, 0);
+            assert_eq!(slept, Duration::ZERO);
         }
     }
 }
