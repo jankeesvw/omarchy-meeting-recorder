@@ -1,0 +1,17 @@
+You|0.5|Morning. Dave is here with me in the office, so there are two of us on this side.
+Dave|0.4|Hi everyone.
+Kristin|0.5|Hi Dave, good to hear you. Shall we start with the plugin directory?
+You|0.4|Yes please. We added search yesterday, and it already finds all two thousand plugins.
+Norman|0.6|I saw it. It's fast, but the install button still copies the old command.
+Dave|-0.7|That's on me, I'll fix it after this call.
+Kristin|0.4|Great. Then the second thing is the newsletter. It goes out on Friday.
+You|0.5|Who is writing the intro this time?
+Dave|0.3|I can do it. I have a draft about running Omarchy on a potato PC.
+Norman|-0.5|Can you add a screenshot of the new lock screen?
+Dave|0.3|Sure, I'll take one this afternoon.
+You|0.5|Good. Kristin, anything from the forum this week?
+Kristin|0.4|Only one thing. Three people asked how to go back to the default theme. We should make that easier to find.
+Norman|0.4|I can add it to the theme menu, right at the top.
+You|-0.6|Yes, let's do that.
+Dave|0.3|Then I think we're done. Thanks everyone.
+Kristin|-0.3|Thanks, bye.

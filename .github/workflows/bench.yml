@@ -1,0 +1,107 @@
+name: Bench
+
+# Builds the app on Arch (libadwaita 1.6 is newer than Ubuntu has), runs the
+# unit tests and the bench, including the first minutes of a real AMI meeting,
+# and fails when a case scores below bench/thresholds.json. The scores are kept
+# as an artifact; "Bench comment" posts them on the pull request, also for pull
+# requests from forks, which may not write to this repository themselves.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    timeout-minutes: 45
+    env:
+      # The app keeps its models under $XDG_DATA_HOME; a fixed path to cache.
+      XDG_DATA_HOME: /cache/data
+      CARGO_HOME: /cache/cargo
+    steps:
+      - name: Install build and runtime dependencies
+        run: pacman -Syu --noconfirm --needed base-devel git rust cmake clang gtk4 libadwaita ffmpeg libpulse python
+
+      - uses: actions/checkout@v4
+
+      # Restored and saved as separate steps, so a failing bench still keeps
+      # the downloads and the build for the next run.
+      - name: Restore Cargo and the build
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            /cache/cargo/registry
+            /cache/cargo/git
+            target
+          key: cargo-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: cargo-${{ hashFiles('Cargo.lock') }}-
+
+      - name: Restore the models and the AMI meeting
+        id: models
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            /cache/data/omarchy-meeting-recorder/models
+            bench/.cache
+          # Change the key when the bench model or the speaker model changes.
+          key: models-small.en-nemotron-353b6f8-ami-ES2004a
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Unit tests
+        run: cargo test --release
+
+      - name: Bench
+        run: |
+          set -o pipefail
+          # small.en keeps a run under half an hour on GitHub's four cores; the
+          # bench is about who said what, which does not depend on the model.
+          python3 bench/run.py --ami --model small.en --check --json bench-results.json --keep bench-transcripts | tee bench-table.txt
+          { echo '```'; cat bench-table.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save Cargo and the build
+        if: ${{ always() }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            /cache/cargo/registry
+            /cache/cargo/git
+            target
+          key: cargo-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+
+      - name: Save the models and the AMI meeting
+        if: ${{ always() && steps.models.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            /cache/data/omarchy-meeting-recorder/models
+            bench/.cache
+          key: models-small.en-nemotron-353b6f8-ami-ES2004a
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: bench-transcripts
+          path: bench-transcripts
+          if-no-files-found: ignore
+
+      - name: Keep the scores for the comment
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        run: |
+          mkdir -p bench-comment
+          echo "${{ github.event.pull_request.number }}" > bench-comment/pr.txt
+          echo "${{ github.event.pull_request.head.sha }}" > bench-comment/sha.txt
+          cp bench-results.json bench-comment/ 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        with:
+          name: bench-comment
+          path: bench-comment

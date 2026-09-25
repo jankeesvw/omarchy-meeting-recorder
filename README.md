@@ -176,6 +176,10 @@ Your own scripts, picked from the **Actions** menu on the done page: store the t
 
 [docs/actions.md](docs/actions.md) explains it all, with two complete examples (Store transcript in Obsidian, and Publish as public transcript, where your default agent writes the summary) and a section for your agent, so you can ask it to write actions for you.
 
+## Testing
+
+`bench/` holds a small test suite: recordings of calls with people talking at once, echo through speakers, two people at one mic, music in the background and silence, plus a real meeting from the AMI corpus. `bench/run.py` runs the app over them and scores the transcript and the speakers; CI runs it on every pull request and posts the scores there. See [bench/README.md](bench/README.md).
+
 ## Privacy
 
 The audio, the transcript and everything else stay on your computer. The only thing that leaves it is the transcript text for the chapters, and only when you have set a default agent: it goes to that agent's service, the one you already chose and pay for. No agent, no chapters, nothing sent. Actions are yours: they send whatever your scripts send, and only when you pick one.
