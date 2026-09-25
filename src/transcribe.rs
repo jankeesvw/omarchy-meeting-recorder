@@ -558,13 +558,18 @@ pub fn transcribe(
         emit(events, Event::Progress(1.0));
         return Ok(empty(language));
     }
-    let remote = remote_voices(&computer, events, abort)?;
+    // Several voices on one side are told apart: people sharing your mic, or
+    // several people on the other end of the call. On the mic only your own
+    // stretches count, so the other side leaking in is not taken for a person
+    // in the room.
+    let local = voices(&only(&mic, &mic_regions), events, abort)?;
+    let remote = voices(&computer, events, abort)?;
     let context = load_whisper(events, abort)?;
 
     let length = |regions: &[Region]| regions.iter().map(|r| r.end - r.start).sum::<usize>();
     let total = (length(&mic_regions) + length(&computer_regions)).max(1) as f64;
     let mut sides = [
-        (&mic, &mic_regions, Speakers::Side("You", Vec::new())),
+        (&mic, &mic_regions, Speakers::Side("You", local)),
         (
             &computer,
             &computer_regions,
@@ -618,6 +623,10 @@ pub fn transcribe(
 /// paragraphs per speaker. A sentence of yours that repeats what the other
 /// side said at the same moment is their voice leaking into your mic, and goes.
 fn interleave(mut sentences: Vec<Segment>) -> Vec<Segment> {
+    let is_local = |speaker: &str| {
+        crate::meeting::side_of(speaker)
+            .is_some_and(|(side, _)| side == crate::meeting::DEFAULT_YOU)
+    };
     sentences.sort_by_key(|s| s.start_ms);
     let words = |text: &str| -> Vec<String> {
         text.split_whitespace()
@@ -634,7 +643,7 @@ fn interleave(mut sentences: Vec<Segment>) -> Vec<Segment> {
         let near: Vec<Vec<String>> = sentences
             .iter()
             .filter(|s| {
-                s.speaker != "You"
+                !is_local(&s.speaker)
                     && s.start_ms < mine.end_ms + 2000
                     && mine.start_ms < s.end_ms + 2000
             })
@@ -656,7 +665,7 @@ fn interleave(mut sentences: Vec<Segment>) -> Vec<Segment> {
     };
     let keep: Vec<bool> = sentences
         .iter()
-        .map(|s| s.speaker != "You" || !is_echo(s))
+        .map(|s| !is_local(&s.speaker) || !is_echo(s))
         .collect();
     let mut out: Vec<Segment> = Vec::new();
     for (sentence, keep) in sentences.into_iter().zip(keep) {
@@ -680,27 +689,32 @@ fn interleave(mut sentences: Vec<Segment>) -> Vec<Segment> {
     out
 }
 
-/// Who is who on the computer audio of a recording: the turns when more than
-/// one voice is heard there, nothing when it is one person (then they are
-/// simply Remote). A missing speaker model is no reason to fail the
-/// transcript; the other side then stays one speaker.
-fn remote_voices(
-    computer: &[f32],
+/// `track` with everything outside `regions` silenced.
+fn only(track: &[f32], regions: &[Region]) -> Vec<f32> {
+    let mut out = vec![0.0; track.len()];
+    for region in regions {
+        out[region.start..region.end].copy_from_slice(&track[region.start..region.end]);
+    }
+    out
+}
+
+/// Who is who on one side of a recording: the turns when more than one voice
+/// is heard there, nothing when it is one person. A missing speaker model is
+/// no reason to fail the transcript; the side then stays one speaker.
+fn voices(
+    track: &[f32],
     events: &Events,
     abort: &Abort,
 ) -> Result<Vec<crate::diarize::Turn>, String> {
-    if is_silent(computer) {
+    if is_silent(track) {
         return Ok(Vec::new());
     }
-    match crate::diarize::turns(computer, None, events, abort) {
+    match crate::diarize::turns(track, None, events, abort) {
         Ok(turns) if turns.iter().any(|t| t.speaker > 0) => Ok(turns),
         Ok(_) => Ok(Vec::new()),
         Err(e) if e == CANCELLED => Err(e),
         Err(e) => {
-            eprintln!(
-                "{}: finding the voices on the computer audio: {e}",
-                crate::APP_NAME
-            );
+            eprintln!("{}: telling voices apart: {e}", crate::APP_NAME);
             Ok(Vec::new())
         }
     }

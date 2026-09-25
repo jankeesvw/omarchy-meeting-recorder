@@ -1477,6 +1477,7 @@ impl Recorder {
             format: Format::Mono,
             language: language.to_owned(),
             speakers: Vec::new(),
+            labels: Vec::new(),
             imported: path.file_name().map(|n| n.to_string_lossy().into_owned()),
             speaker_count: speakers,
             model: None,
@@ -1797,6 +1798,7 @@ impl Recorder {
                     settings::load_your_name(),
                     meeting::DEFAULT_REMOTE.to_owned(),
                 ],
+                labels: Vec::new(),
                 imported: None,
                 speaker_count: None,
                 model: None,
@@ -1918,27 +1920,43 @@ impl Recorder {
                 }
                 manifest.speakers = names;
             } else {
-                // Several voices on the computer audio come out as Remote 1,
-                // Remote 2, ...: one name each, after your own.
-                let remotes = speakers_in(&markdown)
-                    .iter()
-                    .filter_map(|s| s.strip_prefix("Remote ")?.parse::<usize>().ok())
-                    .max()
-                    .unwrap_or(0);
-                if remotes > 1 {
-                    let mut names = manifest.speakers.clone();
-                    if names.len() <= 2 {
-                        names.truncate(1);
-                    }
-                    while names.len() < remotes + 1 {
-                        let n = names.len();
-                        names.push(format!("Remote {n}"));
-                    }
-                    names.truncate(remotes + 1);
+                // A recording: You, or You 1, You 2, ... when several people
+                // share the mic, then Remote or Remote 1, Remote 2, ... Keep
+                // the names already given to a label; a new one gets a default.
+                let mut labels: Vec<String> = speakers_in(&markdown)
+                    .into_iter()
+                    .filter(|l| meeting::side_of(l).is_some())
+                    .collect();
+                labels.sort_by_key(|l| {
+                    let (side, n) = meeting::side_of(l).unwrap_or(("", 0));
+                    (side != meeting::DEFAULT_YOU, n)
+                });
+                if !labels.is_empty() {
+                    let known: std::collections::HashMap<String, String> = manifest
+                        .default_labels()
+                        .into_iter()
+                        .zip(manifest.speakers.iter().cloned())
+                        .collect();
+                    let names = labels
+                        .iter()
+                        .map(|label| {
+                            if let Some(name) = known.get(label) {
+                                return name.clone();
+                            }
+                            match meeting::side_of(label) {
+                                // The first voice on the mic is you.
+                                Some((side, 1)) => {
+                                    known.get(side).cloned().unwrap_or_else(|| label.clone())
+                                }
+                                Some((side, n)) if side == meeting::DEFAULT_YOU => {
+                                    format!("Room {n}")
+                                }
+                                _ => label.clone(),
+                            }
+                        })
+                        .collect();
+                    manifest.labels = labels;
                     manifest.speakers = names;
-                } else if manifest.speakers.len() > 2 {
-                    manifest.speakers.truncate(2);
-                    manifest.speakers[1] = meeting::DEFAULT_REMOTE.to_owned();
                 }
             }
             // The transcription labels speakers You/Remote or Speaker N; use
@@ -2694,14 +2712,23 @@ impl Recorder {
             return;
         };
         let mut rows = Vec::new();
+        let labels = manifest.default_labels();
         for (i, name) in manifest.speakers.iter().enumerate() {
-            let title = match (manifest.imported.is_some(), i) {
-                (false, 0) => "Speaker on the microphone".to_owned(),
-                (false, _) if manifest.speakers.len() > 2 => {
-                    format!("Speaker {i} on the computer audio")
+            let side = labels.get(i).and_then(|l| meeting::side_of(l));
+            let title = match (manifest.imported.is_some(), side) {
+                (true, _) | (false, None) => format!("Speaker {}", i + 1),
+                (false, Some((side, n))) => {
+                    let place = if side == meeting::DEFAULT_YOU {
+                        "the microphone"
+                    } else {
+                        "the computer audio"
+                    };
+                    if n == 0 {
+                        format!("Speaker on {place}")
+                    } else {
+                        format!("Speaker {n} on {place}")
+                    }
                 }
-                (false, _) => "Speaker on the computer audio".to_owned(),
-                (true, _) => format!("Speaker {}", i + 1),
             };
             let row = adw::EntryRow::builder()
                 .title(title)

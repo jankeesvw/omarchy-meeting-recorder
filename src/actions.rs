@@ -296,6 +296,7 @@ name = "not an action"
             format: crate::export::Format::Mono,
             language: "en".into(),
             speakers: vec!["Maya".into(), "Tom".into()],
+            labels: Vec::new(),
             imported: None,
             speaker_count: None,
             model: None,

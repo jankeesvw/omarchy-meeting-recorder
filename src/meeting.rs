@@ -28,6 +28,10 @@ pub struct Manifest {
     /// for a recording [microphone, computer audio], for an imported file
     /// [Speaker 1, Speaker 2, ...].
     pub speakers: Vec<String>,
+    /// The label the transcription gave each of `speakers` (You 1, Remote 2,
+    /// ...). Empty in meetings from before labels were kept; then they follow
+    /// from the kind of meeting, see `default_labels`.
+    pub labels: Vec<String>,
     /// The original file name when the meeting was imported instead of recorded.
     pub imported: Option<String>,
     /// How many speakers were asked for on import; None means automatic.
@@ -51,6 +55,7 @@ impl Manifest {
             "format": self.format.key(),
             "language": self.language,
             "speakers": self.speakers,
+            "labels": self.labels,
             "imported": self.imported,
             "speaker_count": self.speaker_count,
             "model": self.model,
@@ -81,6 +86,14 @@ impl Manifest {
                     .collect(),
                 _ => vec![DEFAULT_YOU.to_owned(), DEFAULT_REMOTE.to_owned()],
             },
+            labels: value["labels"]
+                .as_array()
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default(),
             imported: value["imported"].as_str().map(str::to_owned),
             speaker_count: value["speaker_count"].as_u64().map(|n| n as usize),
             model: value["model"].as_str().map(str::to_owned),
@@ -104,15 +117,17 @@ impl Manifest {
 
 impl Manifest {
     /// The labels the transcription gives the speakers, in the order of
-    /// `speakers`: You and Remote (or Remote 1, Remote 2, ... when the computer
-    /// audio holds several voices) for a recording, Speaker N for an import.
+    /// `speakers`: as kept in the meeting, or for an older meeting You and
+    /// Remote (Remote 1, Remote 2, ... with several voices on the computer
+    /// audio) for a recording and Speaker N for an import.
     pub fn default_labels(&self) -> Vec<String> {
-        if self.imported.is_some() {
+        if self.labels.len() == self.speakers.len() && !self.labels.is_empty() {
+            self.labels.clone()
+        } else if self.imported.is_some() {
             (1..=self.speakers.len().max(1))
                 .map(|i| format!("Speaker {i}"))
                 .collect()
         } else if self.speakers.len() > 2 {
-            // Several voices on the computer audio: Remote 1, Remote 2, ...
             std::iter::once(DEFAULT_YOU.to_owned())
                 .chain((1..self.speakers.len()).map(|i| format!("{DEFAULT_REMOTE} {i}")))
                 .collect()
@@ -120,6 +135,24 @@ impl Manifest {
             vec![DEFAULT_YOU.to_owned(), DEFAULT_REMOTE.to_owned()]
         }
     }
+}
+
+/// The side of a recording a label belongs to, and its number on that side:
+/// ("You", 2) for "You 2", ("Remote", 0) for plain "Remote".
+pub fn side_of(label: &str) -> Option<(&'static str, usize)> {
+    for side in [DEFAULT_YOU, DEFAULT_REMOTE] {
+        if label == side {
+            return Some((side, 0));
+        }
+        if let Some(n) = label
+            .strip_prefix(side)
+            .and_then(|rest| rest.strip_prefix(' '))
+            .and_then(|n| n.parse::<usize>().ok())
+        {
+            return Some((side, n));
+        }
+    }
+    None
 }
 
 /// Renames several speakers at once, safe when names swap places: every old
@@ -239,6 +272,7 @@ fn from_folder(dir: &Path) -> Option<Manifest> {
         format,
         language: "auto".to_owned(),
         speakers: vec![DEFAULT_YOU.to_owned(), DEFAULT_REMOTE.to_owned()],
+        labels: Vec::new(),
         imported: None,
         speaker_count: None,
         model: None,
@@ -249,7 +283,16 @@ fn from_folder(dir: &Path) -> Option<Manifest> {
 
 #[cfg(test)]
 mod tests {
-    use super::relabel;
+    use super::{relabel, side_of};
+
+    #[test]
+    fn labels_tell_the_side_and_number() {
+        assert_eq!(side_of("You"), Some(("You", 0)));
+        assert_eq!(side_of("You 2"), Some(("You", 2)));
+        assert_eq!(side_of("Remote 3"), Some(("Remote", 3)));
+        assert_eq!(side_of("Speaker 1"), None);
+        assert_eq!(side_of("Youri"), None);
+    }
 
     const MD: &str = "# Weekly\n\n**[00:01] You:** Hi.\n\n**[00:03] Remote:** You: said hi.\n";
 
