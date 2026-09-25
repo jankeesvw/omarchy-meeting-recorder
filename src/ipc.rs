@@ -51,16 +51,67 @@ pub fn now() -> i64 {
 }
 
 /// Commands a client may send, one per line.
-pub const COMMANDS: [&str; 4] = ["start", "stop", "compact", "pause"];
+#[derive(Debug, PartialEq)]
+pub enum Control {
+    Start,
+    AutoStart(Option<String>),
+    Stop,
+    Compact,
+    Pause,
+}
+
+fn parse_command(line: &str) -> Option<Control> {
+    match line.trim() {
+        "start" => Some(Control::Start),
+        "stop" => Some(Control::Stop),
+        "compact" => Some(Control::Compact),
+        "pause" => Some(Control::Pause),
+        other => {
+            let value: serde_json::Value = serde_json::from_str(other).ok()?;
+            if value["command"].as_str()? != "auto-start" {
+                return None;
+            }
+            if value["title"].is_null() {
+                return Some(Control::AutoStart(None));
+            }
+            let title = value["title"].as_str()?.trim();
+            if title.is_empty()
+                || title.chars().count() > 200
+                || title.chars().any(char::is_control)
+            {
+                return None;
+            }
+            Some(Control::AutoStart(Some(title.to_owned())))
+        }
+    }
+}
+
+/// Read one status snapshot without waiting indefinitely for the GUI.
+pub fn snapshot() -> Result<serde_json::Value, String> {
+    let stream = UnixStream::connect(socket_path()).map_err(|e| e.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    BufReader::new(stream)
+        .take(MAX_LINE as u64)
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
+    serde_json::from_str(&line).map_err(|e| e.to_string())
+}
+
+pub fn auto_start(title: Option<&str>) -> bool {
+    send(&serde_json::json!({"command": "auto-start", "title": title}).to_string())
+}
 
 /// Starts the socket server. Called once, from the primary instance. Clients
-/// get the state lines; a line a client writes that names one of `COMMANDS` is
+/// get the state lines; a valid control command a client writes is
 /// passed on to `commands`.
 pub fn serve(
     status: SharedStatus,
     mic: Source,
     system: Source,
-    commands: async_channel::Sender<&'static str>,
+    commands: async_channel::Sender<Control>,
 ) {
     let path = socket_path();
     // A socket file left behind by a crash refuses new binds; nobody answers on it.
@@ -132,15 +183,16 @@ pub fn serve(
     });
 }
 
-fn read_commands(stream: UnixStream, commands: &async_channel::Sender<&'static str>) {
+fn read_commands(stream: UnixStream, commands: &async_channel::Sender<Control>) {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     loop {
         line.clear();
         match reader.by_ref().take(MAX_LINE as u64).read_line(&mut line) {
             Ok(0) | Err(_) => return,
+            Ok(_) if !line.ends_with('\n') => return,
             Ok(_) => {
-                if let Some(command) = COMMANDS.iter().find(|c| **c == line.trim()) {
+                if let Some(command) = parse_command(&line) {
                     let _ = commands.send_blocking(command);
                 }
             }
@@ -191,5 +243,51 @@ pub fn watch() {
             return;
         }
         thread::sleep(Duration::from_secs(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_commands_still_work() {
+        assert_eq!(parse_command("start\n"), Some(Control::Start));
+        assert_eq!(parse_command("stop"), Some(Control::Stop));
+        assert_eq!(parse_command("pause"), Some(Control::Pause));
+        assert_eq!(parse_command("compact"), Some(Control::Compact));
+    }
+
+    #[test]
+    fn auto_start_preserves_unicode_and_quotes() {
+        let title = "Team’s \"weekly\" meeting";
+        let line = serde_json::json!({"command":"auto-start", "title":title}).to_string();
+        assert_eq!(
+            parse_command(&line),
+            Some(Control::AutoStart(Some(title.into())))
+        );
+    }
+
+    #[test]
+    fn auto_start_can_leave_naming_to_the_app() {
+        assert_eq!(
+            parse_command(r#"{"command":"auto-start","title":null}"#),
+            Some(Control::AutoStart(None))
+        );
+    }
+
+    #[test]
+    fn invalid_commands_and_titles_are_rejected() {
+        for line in ["unknown", "{}", r#"{"command":"stop","title":"meeting"}"#] {
+            assert_eq!(parse_command(line), None);
+        }
+        for title in [String::new(), " ".into(), "x".repeat(201), "a\nb".into()] {
+            assert_eq!(
+                parse_command(
+                    &serde_json::json!({"command":"auto-start", "title":title}).to_string()
+                ),
+                None
+            );
+        }
     }
 }

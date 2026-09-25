@@ -239,6 +239,28 @@ omarchy plugin enable jankeesvw.meeting-recorder --section right
 
 This also recovers a failed first-start “Add to Bar” attempt in version 1.0.2, which leaves the widget linked but does not offer again on restart.
 
+## Meeting title detection
+
+In **Preferences** (gear button or **Ctrl+,**), enable **Detect meeting title** to suggest the name of an open Zoom or Google Meet meeting. This is off by default and never starts a recording. A name you type takes precedence, and recordings already in progress are not renamed. If multiple meeting windows are detected, no name is guessed.
+
+Detection reads Hyprland window metadata. Supported hints include dedicated Chromium Zoom web apps, native Zoom meeting windows, dedicated Google Meet web apps, and Google Meet tabs whose browser window title identifies Meet. Only the selected tab of each browser window is visible to Hyprland; hidden tabs cannot be inspected. Known home, join, waiting-room and ended titles are filtered, but a titled preview can still look like a meeting.
+
+Some providers expose only a generic title or a meeting code. Those identify the provider but do not supply a meeting name; the recorder keeps your manual name or its usual timestamp default. No calendar or browser account access is used.
+
+Run `omarchy-meeting-recorder detect-meetings` to inspect the detected providers and available titles without recording.
+
+## Automatic recording
+
+**Preferences → Start recording automatically** enables a background watcher for Zoom and Google Meet. This switch is off by default and independent of **Detect meeting title**. With title detection off, recordings use your manual name or the normal timestamp default. With it on, an available meeting name is suggested without overriding a name you typed.
+
+The watcher waits for one unambiguous meeting window in two consecutive checks. It opens the recorder if needed and leaves a busy recorder alone. Known home/join/ended screens are filtered, but detection is based on window metadata, not an authoritative joined-call signal: a titled preview can trigger recording. The selected Google Meet tab must be visible in a browser window; hidden tabs cannot be detected.
+
+Stop recording manually when finished. Leaving a call does not stop recording. A handled meeting is suppressed for two hours after its last automatic-start attempt. During that time, manual Stop, switching browser tabs, and restarting the watcher do not restart the same call. The deadline is persisted and does not slide while the window stays visible. After expiry, a still-visible meeting window can trigger another recording if the recorder is idle—even if it is a leftover or preview tab. A busy recorder is left uninterrupted; a skipped attempt begins another two-hour suppression period. A different Meet code or name, or a closed/reopened window, can trigger another recording. A title change is a new identity when no code is visible. When available, a Google Meet code or numeric Zoom meeting ID distinguishes rooms with identical names. Dedicated web-app launch metadata can supply this ID; it may become stale if the app navigates to another room. A visible Meet code takes precedence. For named browser tabs and native Zoom windows without an ID, Preferences → Meeting identity accepts an optional Meeting URL. Apply it while exactly one meeting window is detected. Only the provider and room ID are retained, scoped to that window and fallback identity for two hours; invitation passwords and query parameters are discarded. Apply a new link when switching rooms, particularly when native Zoom retains the same generic window title. Standard Zoom `/j/ID` and web-client meeting links are supported; vanity `/my/name` links are not. Recurring meetings that reuse a room ID still use the two-hour suppression timeout. Without an ID or a new link, same-name rooms remain indistinguishable. A meeting skipped because the recorder was busy is not retried automatically.
+
+The switch creates `omarchy-meeting-recorder-auto-record.service` in your user systemd configuration, using the current executable. It starts with the graphical session and runs independently of the recorder GUI. Turning it off stops detection without interrupting a recording. If a source-built executable moves, toggle the switch off and on from the new location.
+
+Use `omarchy-meeting-recorder auto-record --check` for read-only diagnostics and `journalctl --user -u omarchy-meeting-recorder-auto-record.service` for watcher errors.
+
 ## Command line
 
 | Command | What it does |
