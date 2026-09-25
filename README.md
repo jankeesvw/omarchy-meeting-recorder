@@ -96,6 +96,10 @@ When Omarchy has a default coding agent set (`omarchy default agent`, for instan
 
 Chapters are an extra, not a requirement: without an agent the button is simply not there and everything else works the same. The agent runs without any tools. It gets the transcript and the instructions, and can only answer with text.
 
+### Runs your own actions
+
+Put a few scripts of your own under **Actions** on the done page: file the meeting in your notes, publish it, mail it around. They go in `~/.config/omarchy-meeting-recorder/config.toml`, each with a name for the menu and a command, and the button only shows up once there is one. See [Actions](#actions).
+
 ### Wears your Omarchy theme
 
 The app reads the palette of the current theme (`colors.toml`): the background, the accent, and the theme's own colours for the speakers, the waves and the animation. Switch themes while it is open and it follows.
@@ -164,9 +168,47 @@ The command-line `transcribe` and `transcribe-file` take `--model` instead. When
 
 The app looks for `ggml-<model>.bin`, for instance `ggml-large-v3-turbo.bin`, in `~/.local/share/omarchy-meeting-recorder/models/`. If you use [voxtype](https://voxtype.io) and it already downloaded that model to `~/.local/share/voxtype/models/`, that copy is used. Otherwise it is downloaded (about 1.6 GB for `large-v3-turbo`) from [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp). Finding speakers downloads the speaker model on first use (about 120 MB) to `nemotron-3-diarization/` in the same directory: the int8 ONNX export of Nemotron 3 Diarization from the [Hugging Face ONNX community](https://huggingface.co/onnx-community/Nemotron-3-Diarization-ONNX), pinned to one revision. The model is NVIDIA's, under the [OpenMDW license](https://huggingface.co/nvidia/Nemotron-3-Diarization). ONNX Runtime is compiled into the binary, so nothing else is needed at runtime.
 
+## Actions
+
+An action is a command of your own, picked from the **Actions** menu on the done page. Add them to `~/.config/omarchy-meeting-recorder/config.toml`:
+
+```toml
+[[action]]
+name = "Copy to Obsidian"
+command = "OBSIDIAN_VAULT=~/Documents/Notes ~/bin/copy-to-obsidian"
+
+[[action]]
+name = "Publish as a gist"
+command = "~/bin/publish-gist"
+```
+
+The command runs through `sh -c` in the meeting folder, with that folder as `$1`, and gets the meeting in these variables:
+
+| Variable | What it holds |
+|---|---|
+| `MEETING_DIR` | The meeting folder |
+| `MEETING_TRANSCRIPT` | `transcript.md` in it |
+| `MEETING_MANIFEST` | The `.meeting-recorder` file, JSON with the speakers and chapters |
+| `MEETING_TITLE` | The name of the meeting |
+| `MEETING_DATE` | When it started, `2026-09-25 14:30` |
+| `MEETING_STARTED_AT` | The same as a Unix timestamp |
+| `MEETING_DURATION` | Its length in seconds |
+| `MEETING_LANGUAGE` | The transcript language, a code like `en` |
+| `MEETING_SPEAKERS` | The speakers' names, one per line |
+| `MEETING_AUDIO` | The audio file, when there is one |
+
+While it runs the app says so; when it is done it shows the last line the command printed, or its error. A link on that line, to a web page or an `obsidian://` note, gets an **Open** button. The menu is read from the config every time it opens, so a new action shows up without restarting.
+
+Two examples live in [examples/actions](examples/actions):
+
+- **[copy-to-obsidian](examples/actions/copy-to-obsidian)** writes the meeting as a note in your Obsidian vault: date, duration and people as properties, the chapters and the transcript, and with `SUMMARY=1` a summary and the action items from your default agent.
+- **[publish-gist](examples/actions/publish-gist)** lets your default agent write a summary, the decisions and the action items, puts the transcript under it as it is, and publishes that as a secret GitHub gist. Secret means unlisted: anyone with the link can read it, so only use it for meetings you would share anyway.
+
+With your default agent in the loop an action can do nearly anything: `omarchy-meeting-recorder ask "<prompt>" < "$MEETING_TRANSCRIPT"` runs a prompt over the transcript and prints the answer.
+
 ## Privacy
 
-The audio, the transcript and everything else stay on your computer. The only thing that leaves it is the transcript text for the chapters, and only when you have set a default agent: it goes to that agent's service, the one you already chose and pay for. No agent, no chapters, nothing sent.
+The audio, the transcript and everything else stay on your computer. The only thing that leaves it is the transcript text for the chapters, and only when you have set a default agent: it goes to that agent's service, the one you already chose and pay for. No agent, no chapters, nothing sent. Actions are yours: they send whatever your scripts send, and only when you pick one.
 
 ## Requirements
 

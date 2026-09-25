@@ -86,7 +86,7 @@ pub fn set_override(name: &str) {
     *OVERRIDE.lock().unwrap() = Some(name.trim().to_owned());
 }
 
-fn config_file() -> PathBuf {
+pub fn config_file() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())

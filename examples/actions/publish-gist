@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Publishes a meeting as a secret GitHub gist: your default agent writes the
+# summary, the decisions and the action items, and the transcript follows as
+# it is. Secret means unlisted: anyone with the link can read it.
+#
+# An action for Meeting Recorder, in ~/.config/omarchy-meeting-recorder/config.toml:
+#
+#   [[action]]
+#   name = "Publish as a gist"
+#   command = "/path/to/publish-gist"
+#
+# Needs the GitHub CLI, logged in (gh auth login), and a default agent in Omarchy.
+set -euo pipefail
+: "${MEETING_TRANSCRIPT:?run this as a Meeting Recorder action}"
+
+prompt='Write a short page about this meeting for people who were not there: a summary of a few sentences, then the decisions and the action items (who does what) as bullets. Use the language of the meeting. Markdown with "## Summary", "## Decisions" and "## Action items" as headings, nothing else.'
+summary=$(omarchy-meeting-recorder ask "$prompt" < "$MEETING_TRANSCRIPT")
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+page="$tmp/$(printf '%s' "$MEETING_TITLE" | tr -c 'A-Za-z0-9 _-' '-' | tr ' ' '-').md"
+{
+  printf '# %s\n\n_%s_\n\n' "$MEETING_TITLE" "$MEETING_DATE"
+  printf '%s\n\n' "$summary"
+  printf '## Transcript\n\n'
+  sed -n '/^## Transcript/,$p' "$MEETING_TRANSCRIPT" | tail -n +2
+} > "$page"
+
+url=$(gh gist create --desc "$MEETING_TITLE ($MEETING_DATE)" "$page")
+echo "Published as a secret gist: $url"

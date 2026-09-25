@@ -143,6 +143,8 @@ struct Recorder {
     status_label: gtk::Label,
     button: gtk::Button,
     copy_button: gtk::Button,
+    /// Your own scripts from config.toml, hidden when there are none.
+    actions_button: gtk::MenuButton,
     again_button: gtk::Button,
     done_title_row: adw::EntryRow,
     done_group: adw::PreferencesGroup,
@@ -422,6 +424,14 @@ impl Recorder {
             .build();
         left.append(&copy_button);
 
+        let actions_button = gtk::MenuButton::builder()
+            .label("Actions")
+            .always_show_arrow(true)
+            .css_classes(["pill"])
+            .visible(false)
+            .build();
+        left.append(&actions_button);
+
         let actions = gtk::Box::builder().spacing(8).homogeneous(true).build();
         let open_button = gtk::Button::builder()
             .label("Open folder")
@@ -566,6 +576,8 @@ impl Recorder {
 
         let compact_action = gio::SimpleAction::new("compact", None);
         window.add_action(&compact_action);
+        let run_action = gio::SimpleAction::new("run-action", Some(glib::VariantTy::INT32));
+        window.add_action(&run_action);
         let quit_action = gio::SimpleAction::new("quit", None);
         app.add_action(&quit_action);
 
@@ -589,6 +601,7 @@ impl Recorder {
             status_label,
             button,
             copy_button,
+            actions_button,
             again_button,
             done_title_row,
             done_group,
@@ -937,6 +950,27 @@ impl Recorder {
             }
         });
 
+        // The menu is made when it opens, so an edit to config.toml shows up
+        // without restarting the app.
+        let weak = Rc::downgrade(self);
+        self.actions_button.set_create_popup_func(move |_| {
+            if let Some(r) = weak.upgrade() {
+                r.refresh_actions();
+            }
+        });
+        if let Some(action) = self.window.lookup_action("run-action") {
+            let weak = Rc::downgrade(self);
+            action
+                .downcast::<gio::SimpleAction>()
+                .expect("run-action is a SimpleAction")
+                .connect_activate(move |_, parameter| {
+                    let index = parameter.and_then(|p| p.get::<i32>());
+                    if let (Some(r), Some(index)) = (weak.upgrade(), index) {
+                        r.run_action(index as usize);
+                    }
+                });
+        }
+
         let weak = Rc::downgrade(self);
         self.again_button.connect_clicked(move |_| {
             let Some(r) = weak.upgrade() else { return };
@@ -1004,6 +1038,76 @@ impl Recorder {
                 glib::ControlFlow::Continue
             }
             None => glib::ControlFlow::Break,
+        });
+    }
+
+    /// The Actions menu from config.toml, and the button only when there are any.
+    fn refresh_actions(&self) {
+        let actions = crate::actions::load();
+        let menu = gio::Menu::new();
+        for (index, action) in actions.iter().enumerate() {
+            let item = gio::MenuItem::new(Some(&action.name), None);
+            item.set_action_and_target_value(
+                Some("win.run-action"),
+                Some(&(index as i32).to_variant()),
+            );
+            menu.append_item(&item);
+        }
+        self.actions_button.set_menu_model(Some(&menu));
+        self.actions_button.set_visible(!actions.is_empty());
+    }
+
+    /// Runs one of your actions on this meeting, off the main thread, and says
+    /// how it went; a link it printed gets an Open button.
+    fn run_action(self: &Rc<Self>, index: usize) {
+        let Some(action) = crate::actions::load().into_iter().nth(index) else {
+            return;
+        };
+        let (Some(dir), Some(manifest)) = (
+            self.result_dir.borrow().clone(),
+            self.manifest.borrow().clone(),
+        ) else {
+            return;
+        };
+        // Stays until the action is done, then makes way for how it went.
+        let running = adw::Toast::new(&format!("{}…", action.name));
+        running.set_use_markup(false);
+        running.set_timeout(0);
+        self.toasts.add_toast(running.clone());
+        let (tx, rx) = async_channel::bounded(1);
+        let name = action.name.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send_blocking(crate::actions::run(&action, &dir, &manifest));
+        });
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            let result = rx.recv().await;
+            running.dismiss();
+            let Ok(result) = result else { return };
+            let toast = match result {
+                Ok(outcome) => {
+                    let toast = adw::Toast::new(&format!("{name}: {}", outcome.message));
+                    toast.set_use_markup(false);
+                    if let Some(url) = outcome.url {
+                        toast.set_button_label(Some("Open"));
+                        toast.set_timeout(15);
+                        toast.connect_button_clicked(move |_| {
+                            let _ = gio::AppInfo::launch_default_for_uri(
+                                &url,
+                                None::<&gio::AppLaunchContext>,
+                            );
+                        });
+                    }
+                    toast
+                }
+                Err(why) => {
+                    let toast = adw::Toast::new(&format!("{name} failed: {why}"));
+                    toast.set_use_markup(false);
+                    toast.set_timeout(10);
+                    toast
+                }
+            };
+            this.toasts.add_toast(toast);
         });
     }
 
@@ -1938,6 +2042,8 @@ impl Recorder {
             "dialog-warning-symbolic"
         }));
         self.copy_button.set_sensitive(markdown.is_some());
+        self.actions_button.set_sensitive(markdown.is_some());
+        self.refresh_actions();
 
         while let Some(row) = self.transcript_list.row_at_index(0) {
             self.transcript_list.remove(&row);

@@ -2,6 +2,7 @@
 //! audio), transcribes it with whisper.cpp after the call, and streams live
 //! levels to a bar widget.
 
+mod actions;
 mod agent;
 mod animation;
 mod audio;

@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Copies a meeting into an Obsidian vault as a note.
+
+An action for Meeting Recorder, in ~/.config/omarchy-meeting-recorder/config.toml:
+
+    [[action]]
+    name = "Copy to Obsidian"
+    command = "OBSIDIAN_VAULT=~/Documents/Notes /path/to/copy-to-obsidian"
+
+The note goes to <vault>/Meetings/<date> <title>.md, with the date, duration
+and people as properties, the chapters, and the transcript. Running it again
+updates the same note. With SUMMARY=1 your default agent adds a short summary
+and the action items first; that takes a little while.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.parse
+from pathlib import Path
+
+vault = Path(os.path.expanduser(os.environ.get("OBSIDIAN_VAULT", "~/Documents/Notes")))
+folder = os.environ.get("OBSIDIAN_FOLDER", "Meetings")
+title = os.environ["MEETING_TITLE"]
+date = os.environ["MEETING_DATE"]  # 2026-09-25 14:30
+seconds = int(os.environ.get("MEETING_DURATION", "0"))
+duration = f"{round(seconds / 60)} minutes" if seconds >= 90 else f"{seconds} seconds"
+transcript = Path(os.environ["MEETING_TRANSCRIPT"]).read_text()
+manifest = json.loads(Path(os.environ["MEETING_MANIFEST"]).read_text()) if os.environ.get("MEETING_MANIFEST") else {}
+
+# The people who were given a name; "You", "Remote 2" and "Speaker 1" are not people yet.
+unnamed = re.compile(r"^(You|Remote|Room|Speaker)( \d+)?$")
+people = [p for p in os.environ.get("MEETING_SPEAKERS", "").splitlines() if p and not unnamed.match(p)]
+links = [f"[[{p}]]" for p in people]
+
+# Only the lines of the transcript, not its own heading.
+body = transcript.split("## Transcript", 1)[-1].strip()
+
+
+def clock(ms):
+    s = ms // 1000
+    return f"{s // 3600}:{s // 60 % 60:02}:{s % 60:02}" if s >= 3600 else f"{s // 60:02}:{s % 60:02}"
+
+
+chapters = "\n".join(f"- [{clock(c['start_ms'])}] {c['title']}" for c in manifest.get("chapters", []))
+
+summary = ""
+if os.environ.get("SUMMARY") == "1":
+    prompt = ("Summarise this meeting in a few sentences, then list the decisions and the action items "
+              "(who does what) as bullets. Write in the language of the meeting. Markdown, no heading.")
+    answer = subprocess.run(["omarchy-meeting-recorder", "ask", prompt], input=transcript,
+                            capture_output=True, text=True)
+    summary = answer.stdout.strip() if answer.returncode == 0 else ""
+
+lines = ["---", f"date: {date[:10]}", "type: meeting", "source: meeting-recorder"]
+if links:
+    lines += ["people:"] + [f'  - "{l}"' for l in links]
+lines += ["tags:", "  - meeting", "---", "", f"# {title}", "",
+          f"**Date:** {date}", f"**Duration:** {duration}"]
+if links:
+    lines.append(f"**People:** {', '.join(links)}")
+lines.append(f"**Recording:** [{Path(os.environ['MEETING_DIR']).name}]({Path(os.environ['MEETING_DIR']).as_uri()})")
+if summary:
+    lines += ["", "## Summary", "", summary]
+if chapters:
+    lines += ["", "## Chapters", "", chapters]
+lines += ["", "## Transcript", "", body, ""]
+
+name = re.sub(r'[\\/:*?"<>|]', "-", f"{date[:10]} {title}")
+note = vault / folder / f"{name}.md"
+note.parent.mkdir(parents=True, exist_ok=True)
+note.write_text("\n".join(lines))
+
+link = "obsidian://open?" + urllib.parse.urlencode({"vault": vault.name, "file": f"{folder}/{name}"},
+                                                    quote_via=urllib.parse.quote)
+print(f"Saved in {vault.name}: {link}")
