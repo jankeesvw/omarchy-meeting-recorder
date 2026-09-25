@@ -98,7 +98,7 @@ Chapters are an extra, not a requirement: without an agent the button is simply 
 
 ### Runs your own actions
 
-Put a few scripts of your own under **Actions** on the done page: file the meeting in your notes, publish it, mail it around. They go in `~/.config/omarchy-meeting-recorder/config.toml`, each with a name for the menu and a command, and the button only shows up once there is one. See [Actions](#actions).
+Put a few scripts of your own under **Actions** on the done page: store the transcript in your notes, publish it, mail it around. They go in `~/.config/omarchy-meeting-recorder/config.toml`, each with a name for the menu and a command. Until there is one, the button is **Add actions…** and explains how. See [Actions](#actions).
 
 ### Wears your Omarchy theme
 
@@ -170,41 +170,11 @@ The app looks for `ggml-<model>.bin`, for instance `ggml-large-v3-turbo.bin`, in
 
 ## Actions
 
-An action is a command of your own, picked from the **Actions** menu on the done page. Add them to `~/.config/omarchy-meeting-recorder/config.toml`:
+Your own scripts, picked from the **Actions** menu on the done page: store the transcript in Obsidian, publish it, mail it around. Each is a name and a command in `~/.config/omarchy-meeting-recorder/config.toml`; the command gets the meeting folder and the meeting's details, and what it prints last shows up in the app, with an **Open** button for a link.
 
-```toml
-[[action]]
-name = "Copy to Obsidian"
-command = "OBSIDIAN_VAULT=~/Documents/Notes ~/bin/copy-to-obsidian"
+<p align="center"><img src="screenshots/actions.webp" alt="The done page with the Actions menu open, showing Store transcript in Obsidian and Publish as public transcript" width="700"></p>
 
-[[action]]
-name = "Publish as a gist"
-command = "~/bin/publish-gist"
-```
-
-The command runs through `sh -c` in the meeting folder, with that folder as `$1`, and gets the meeting in these variables:
-
-| Variable | What it holds |
-|---|---|
-| `MEETING_DIR` | The meeting folder |
-| `MEETING_TRANSCRIPT` | `transcript.md` in it |
-| `MEETING_MANIFEST` | The `.meeting-recorder` file, JSON with the speakers and chapters |
-| `MEETING_TITLE` | The name of the meeting |
-| `MEETING_DATE` | When it started, `2026-09-25 14:30` |
-| `MEETING_STARTED_AT` | The same as a Unix timestamp |
-| `MEETING_DURATION` | Its length in seconds |
-| `MEETING_LANGUAGE` | The transcript language, a code like `en` |
-| `MEETING_SPEAKERS` | The speakers' names, one per line |
-| `MEETING_AUDIO` | The audio file, when there is one |
-
-While it runs the app says so; when it is done it shows the last line the command printed, or its error. A link on that line, to a web page or an `obsidian://` note, gets an **Open** button. The menu is read from the config every time it opens, so a new action shows up without restarting.
-
-Two examples live in [examples/actions](examples/actions):
-
-- **[copy-to-obsidian](examples/actions/copy-to-obsidian)** writes the meeting as a note in your Obsidian vault: date, duration and people as properties, the chapters and the transcript, and with `SUMMARY=1` a summary and the action items from your default agent.
-- **[publish-gist](examples/actions/publish-gist)** lets your default agent write a summary, the decisions and the action items, puts the transcript under it as it is, and publishes that as a secret GitHub gist. Secret means unlisted: anyone with the link can read it, so only use it for meetings you would share anyway.
-
-With your default agent in the loop an action can do nearly anything: `omarchy-meeting-recorder ask "<prompt>" < "$MEETING_TRANSCRIPT"` runs a prompt over the transcript and prints the answer.
+[docs/actions.md](docs/actions.md) explains it all, with two complete examples (Store transcript in Obsidian, and Publish as public transcript, where your default agent writes the summary) and a section for your agent, so you can ask it to write actions for you.
 
 ## Privacy
 
@@ -279,6 +249,7 @@ This also recovers a failed first-start “Add to Bar” attempt in version 1.0.
 | `omarchy-meeting-recorder transcribe <mic> <computer> [--language xx] [--model name]` | Transcribe two tracks and print the transcript as Markdown |
 | `omarchy-meeting-recorder transcribe-file <audio> [--speakers N] [--language xx] [--model name]` | Transcribe one file, telling the voices apart, and print the transcript as Markdown |
 | `omarchy-meeting-recorder ask "<prompt>" < text` | Run a prompt over stdin through the default agent, without tools (`ask --agent` shows which agent that is) |
+| `omarchy-meeting-recorder action "<name>" <meeting folder>` | Run one of your [actions](docs/actions.md) on a meeting, as the done page does; without arguments it lists them |
 
 For example:
 

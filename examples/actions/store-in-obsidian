@@ -4,8 +4,8 @@
 An action for Meeting Recorder, in ~/.config/omarchy-meeting-recorder/config.toml:
 
     [[action]]
-    name = "Copy to Obsidian"
-    command = "OBSIDIAN_VAULT=~/Documents/Notes /path/to/copy-to-obsidian"
+    name = "Store transcript in Obsidian"
+    command = "OBSIDIAN_VAULT=~/Documents/Notes /path/to/store-in-obsidian"
 
 The note goes to <vault>/Meetings/<date> <title>.md, with the date, duration
 and people as properties, the chapters, and the transcript. Running it again

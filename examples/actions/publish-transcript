@@ -6,8 +6,8 @@
 # An action for Meeting Recorder, in ~/.config/omarchy-meeting-recorder/config.toml:
 #
 #   [[action]]
-#   name = "Publish as a gist"
-#   command = "/path/to/publish-gist"
+#   name = "Publish as public transcript"
+#   command = "/path/to/publish-transcript"
 #
 # Needs the GitHub CLI, logged in (gh auth login), and a default agent in Omarchy.
 set -euo pipefail

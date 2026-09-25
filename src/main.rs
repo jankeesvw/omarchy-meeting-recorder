@@ -45,6 +45,7 @@ fn main() -> glib::ExitCode {
         }
         Some("diarize") => diarize::cli(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("transcribe") => transcribe::cli(&std::env::args().skip(2).collect::<Vec<_>>()),
+        Some("action") => actions::cli(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("ask") => agent::cli(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("-h" | "--help") => {
             println!(
@@ -62,6 +63,7 @@ fn main() -> glib::ExitCode {
             println!(
                 "  ask           run a prompt over stdin through the default agent, without tools"
             );
+            println!("  action        run one of your actions on a meeting folder");
             glib::ExitCode::SUCCESS
         }
         Some(path)

@@ -4,7 +4,7 @@
 //!
 //! ```toml
 //! [[action]]
-//! name = "Copy to Obsidian"
+//! name = "Store transcript in Obsidian"
 //! command = "~/.local/bin/meeting-to-obsidian"
 //! ```
 //!
@@ -17,6 +17,11 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::meeting::Manifest;
+
+/// How actions work, for people and their agents; the done page links here
+/// when there are none yet.
+pub const DOCS: &str =
+    "https://github.com/jankeesvw/omarchy-meeting-recorder/blob/main/docs/actions.md";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Action {
@@ -148,6 +153,55 @@ pub fn run(action: &Action, dir: &Path, manifest: &Manifest) -> Result<Outcome, 
         url: find_url(&message),
         message,
     })
+}
+
+/// `action "<name>" <meeting>`: runs one of your actions on a meeting folder
+/// or `.meeting-recorder` file, exactly as the done page does, and prints how
+/// it went. For trying an action out, by you or by your agent.
+pub fn cli(args: &[String]) -> gtk::glib::ExitCode {
+    use gtk::glib::ExitCode;
+    let actions = load();
+    let [name, meeting] = args else {
+        eprintln!(
+            "Usage: {} action \"<name>\" <meeting folder>",
+            crate::APP_NAME
+        );
+        eprintln!();
+        if actions.is_empty() {
+            eprintln!(
+                "No actions yet; add them to {}",
+                crate::models::config_file().display()
+            );
+            eprintln!("See {DOCS}");
+        } else {
+            eprintln!("Actions in {}:", crate::models::config_file().display());
+            for action in &actions {
+                eprintln!("  {}", action.name);
+            }
+        }
+        return ExitCode::from(2);
+    };
+    let Some(action) = actions.iter().find(|a| &a.name == name) else {
+        eprintln!(
+            "No action called \"{name}\" in {}",
+            crate::models::config_file().display()
+        );
+        return ExitCode::FAILURE;
+    };
+    let Some((dir, manifest)) = crate::meeting::open(Path::new(meeting)) else {
+        eprintln!("No meeting in {meeting}");
+        return ExitCode::FAILURE;
+    };
+    match run(action, &dir, &manifest) {
+        Ok(outcome) => {
+            println!("{}", outcome.message);
+            ExitCode::SUCCESS
+        }
+        Err(why) => {
+            eprintln!("{} failed: {why}", action.name);
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn last_line(text: &str) -> Option<String> {
