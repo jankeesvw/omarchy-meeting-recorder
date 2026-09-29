@@ -1078,8 +1078,22 @@ mod tests {
 
         fn assert_descendant_stopped(&self) {
             let pid = std::fs::read_to_string(self.dir.join("descendant.pid")).unwrap();
-            let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid.trim()));
-            assert!(stat.is_err() || stat.unwrap().split_whitespace().nth(2) == Some("Z"));
+            // SIGKILL is delivered asynchronously: the runner has returned once
+            // it is queued, and a busy machine may run the target a little
+            // later. The descendant never exits on its own before 10 seconds.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid.trim()));
+                if stat.is_err() || stat.unwrap().split_whitespace().nth(2) == Some("Z") {
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "descendant {} survived",
+                    pid.trim()
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
     }
 
@@ -1132,11 +1146,19 @@ mod tests {
                 .open(&answer)
                 .unwrap();
             std::fs::write(state.with_file_name("descendant.ready"), "ready").unwrap();
-            loop {
-                output.write_all(&[b'n'; 8192]).unwrap();
-                std::io::stdout().write_all(&[b'o'; 8192]).unwrap();
-                std::io::stderr().write_all(&[b'e'; 8192]).unwrap();
+            // Keep going when the runner closes its ends (EPIPE), so only its
+            // KILL ends this process early; a runner that forgot it leaks
+            // nothing past the deadline.
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_secs(10) {
+                let failed = output.write_all(&[b'n'; 8192]).is_err()
+                    | std::io::stdout().write_all(&[b'o'; 8192]).is_err()
+                    | std::io::stderr().write_all(&[b'e'; 8192]).is_err();
+                if failed {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
             }
+            std::process::exit(0);
         }
         if matches!(
             mode.as_str(),
