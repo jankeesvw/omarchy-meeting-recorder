@@ -77,8 +77,12 @@ pub fn now() -> i64 {
         .unwrap_or(0)
 }
 
-/// Commands a client may send, one per line.
+/// Commands a client may send, one per line. `start` may be followed by a
+/// space and the meeting's name.
 pub const COMMANDS: [&str; 5] = ["start", "stop", "compact", "pause", "new-window"];
+
+/// A command from a client, and the name that came with `start` ("" without).
+pub type Command = (&'static str, String);
 
 /// Starts the socket server. Called once, from the primary instance. Clients
 /// get the state lines of the busiest window; a line a client writes that
@@ -87,7 +91,7 @@ pub fn serve(
     statuses: Statuses,
     mic: Source,
     system: Source,
-    commands: async_channel::Sender<&'static str>,
+    commands: async_channel::Sender<Command>,
 ) {
     let path = socket_path();
     // A socket file left behind by a crash refuses new binds; nobody answers on it.
@@ -159,7 +163,7 @@ pub fn serve(
     });
 }
 
-fn read_commands(stream: UnixStream, commands: &async_channel::Sender<&'static str>) {
+fn read_commands(stream: UnixStream, commands: &async_channel::Sender<Command>) {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     loop {
@@ -167,11 +171,38 @@ fn read_commands(stream: UnixStream, commands: &async_channel::Sender<&'static s
         match reader.by_ref().take(MAX_LINE as u64).read_line(&mut line) {
             Ok(0) | Err(_) => return,
             Ok(_) => {
-                if let Some(command) = COMMANDS.iter().find(|c| **c == line.trim()) {
+                if let Some(command) = parse_command(&line) {
                     let _ = commands.send_blocking(command);
                 }
             }
         }
+    }
+}
+
+fn parse_command(line: &str) -> Option<Command> {
+    let line = line.trim();
+    let (name, title) = match line.split_once(' ') {
+        Some(("start", title)) => ("start", title.trim()),
+        _ => (line, ""),
+    };
+    COMMANDS
+        .iter()
+        .find(|c| **c == name)
+        .map(|c| (*c, title.to_owned()))
+}
+
+/// `omarchy-meeting-recorder start "Weekly"`: the line that starts a recording
+/// with that name. Whitespace is collapsed, so a name can never add a line.
+pub fn start_line(title: &[String]) -> String {
+    let title = title
+        .iter()
+        .flat_map(|word| word.split_whitespace())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if title.is_empty() {
+        "start".to_owned()
+    } else {
+        format!("start {title}")
     }
 }
 
@@ -231,6 +262,27 @@ mod tests {
             title: title.into(),
             ..Default::default()
         }))
+    }
+
+    #[test]
+    fn start_may_carry_a_name() {
+        assert_eq!(parse_command("start\n"), Some(("start", String::new())));
+        assert_eq!(
+            parse_command("start  Product Review \n"),
+            Some(("start", "Product Review".into()))
+        );
+        assert_eq!(parse_command("stop\n"), Some(("stop", String::new())));
+        // Only start takes a name.
+        assert_eq!(parse_command("stop now\n"), None);
+        assert_eq!(parse_command("starting\n"), None);
+    }
+
+    #[test]
+    fn a_name_cannot_add_a_command() {
+        let args = ["Weekly\nstop".to_owned(), " sync ".to_owned()];
+        assert_eq!(start_line(&args), "start Weekly stop sync");
+        assert_eq!(start_line(&[]), "start");
+        assert_eq!(start_line(&[" ".to_owned()]), "start");
     }
 
     #[test]

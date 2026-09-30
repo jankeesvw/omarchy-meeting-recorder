@@ -104,7 +104,7 @@ impl Hub {
                 let Some(hub) = weak.upgrade() else {
                     break;
                 };
-                hub.command(&app_for_commands, command);
+                hub.command(&app_for_commands, command.0, &command.1);
             }
         });
 
@@ -200,7 +200,8 @@ impl Hub {
     }
 
     /// A command from the socket: `omarchy-meeting-recorder start` and friends.
-    fn command(self: &Rc<Self>, app: &adw::Application, command: &str) {
+    /// `title` is the name that came with `start`, "" without one.
+    fn command(self: &Rc<Self>, app: &adw::Application, command: &str, title: &str) {
         if command == "new-window" {
             self.add_window(app).window.present();
             return;
@@ -212,11 +213,15 @@ impl Hub {
             _ => self.target(app),
         };
         match command {
-            // A name typed on the ready page is kept; from the done page
-            // it starts fresh.
-            "start" if r.state.get() == State::Idle => r.start(),
-            "start" if r.state.get() == State::Done => {
-                r.ready();
+            // A name typed on the ready page is kept unless the command
+            // brings one; from the done page it starts fresh.
+            "start" if matches!(r.state.get(), State::Idle | State::Done) => {
+                if r.state.get() == State::Done {
+                    r.ready();
+                }
+                if !title.is_empty() {
+                    r.title_row.set_text(title);
+                }
                 r.start();
             }
             "stop" => r.stop(),

@@ -259,7 +259,7 @@ This also recovers a failed first-start “Add to Bar” attempt in version 1.0.
 |---|---|
 | `omarchy-meeting-recorder` | Open the recorder, ready to record |
 | `omarchy-meeting-recorder <folder or .meeting-recorder file>` | Open a saved meeting on the done page |
-| `omarchy-meeting-recorder start` | Start recording in the open window, for a keybinding |
+| `omarchy-meeting-recorder start [name]` | Start recording in the open window, for a keybinding; with a name, the meeting gets that name (a script can pass a calendar event's title) |
 | `omarchy-meeting-recorder pause` | Pause or resume the running recording |
 | `omarchy-meeting-recorder stop` | Stop the running recording |
 | `omarchy-meeting-recorder compact` | Switch the recording window between full and compact |

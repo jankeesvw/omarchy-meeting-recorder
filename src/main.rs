@@ -42,7 +42,12 @@ fn main() -> glib::ExitCode {
             glib::ExitCode::SUCCESS
         }
         Some(command @ ("start" | "stop" | "compact" | "pause")) => {
-            if ipc::send(command) {
+            let line = if command == "start" {
+                ipc::start_line(&std::env::args().skip(2).collect::<Vec<_>>())
+            } else {
+                command.to_owned()
+            };
+            if ipc::send(&line) {
                 glib::ExitCode::SUCCESS
             } else {
                 eprintln!("{APP_NAME}: the recorder is not running");
@@ -71,7 +76,7 @@ fn main() -> glib::ExitCode {
             println!();
             println!("  (no command)  open the recorder, ready to record");
             println!("  <meeting>     open a .meeting-recorder file or a meeting folder");
-            println!("  start         start recording in the open window (for a keybinding)");
+            println!("  start [name]  start recording in the open window (for a keybinding)");
             println!("  stop          stop the running recording (for a keybinding)");
             println!("  compact       switch the recording window between full and compact");
             println!("  pause         pause or resume the running recording");
