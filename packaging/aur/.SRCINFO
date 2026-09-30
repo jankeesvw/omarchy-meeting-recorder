@@ -5,6 +5,7 @@ pkgbase = omarchy-meeting-recorder-bin
 	url = https://github.com/jankeesvw/omarchy-meeting-recorder
 	install = omarchy-meeting-recorder.install
 	arch = x86_64
+	arch = aarch64
 	license = MIT
 	depends = gtk4
 	depends = libadwaita
@@ -25,5 +26,7 @@ pkgbase = omarchy-meeting-recorder-bin
 	options = !debug
 	source_x86_64 = https://github.com/jankeesvw/omarchy-meeting-recorder/releases/download/v1.4.0/omarchy-meeting-recorder-1.4.0-x86_64-linux.tar.gz
 	sha256sums_x86_64 = d8358178d11e01f5a34a69839dfcf497dc193163b489107076cd62b34472c639
+	source_aarch64 = https://github.com/jankeesvw/omarchy-meeting-recorder/releases/download/v1.4.0/omarchy-meeting-recorder-1.4.0-aarch64-linux.tar.gz
+	sha256sums_aarch64 = 27461ea285029f5278dfd167545ef230bab79a41cfb9b03fda41b62815f0d341
 
 pkgname = omarchy-meeting-recorder-bin
