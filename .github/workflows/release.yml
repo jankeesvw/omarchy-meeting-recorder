@@ -1,0 +1,82 @@
+name: Release
+
+# Builds the release tarballs for x86_64 and aarch64 and, on a version tag
+# (v1.2.3), attaches them to that release, created as a draft when it does not
+# exist yet. Pull requests that touch the build only build, so both
+# architectures are seen to compile before a release depends on it.
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - packaging/**
+      - .cargo/**
+      - Cargo.lock
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    # Debian 13 has libadwaita 1.7 (Ubuntu 24.04 is at 1.5) and, unlike the
+    # archlinux image, an arm64 image. Its older glibc runs on Arch as well.
+    container: debian:trixie
+    timeout-minutes: 60
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential ca-certificates cmake clang libclang-dev curl git libssl-dev pkg-config libgtk-4-dev libadwaita-1-dev libvulkan-dev glslc
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: grep -qx "version = \"${GITHUB_REF_NAME#v}\"" Cargo.toml
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package
+        run: packaging/release-tarball.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omarchy-meeting-recorder-${{ matrix.arch }}-linux
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes ""
+          # No --clobber: the Omarchy package repository pins the digest of what is published.
+          gh release upload "$TAG" *.tar.gz *.tar.gz.sha256
