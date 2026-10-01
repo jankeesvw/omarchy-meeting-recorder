@@ -59,7 +59,9 @@ jobs:
         run: cargo check --release --no-default-features
 
       - name: Unit tests
-        run: cargo test --release
+        run: |
+          cargo test --release
+          python3 -m unittest discover -s tests -p test_openrouter.py -v
 
       - name: Bench
         run: |

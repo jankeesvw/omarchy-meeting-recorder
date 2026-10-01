@@ -26,9 +26,10 @@ use crate::audio::{CHANNELS, RATE};
 pub const WHISPER_RATE: usize = 16_000;
 
 /// (code, label) in the order of the dropdown. "auto" lets whisper detect it.
-pub const LANGUAGES: [(&str, &str); 8] = [
+pub const LANGUAGES: [(&str, &str); 9] = [
     ("auto", "Auto-detect"),
     ("en", "English"),
+    ("no", "Norwegian"),
     ("nl", "Dutch"),
     ("de", "German"),
     ("fr", "French"),
@@ -527,6 +528,7 @@ pub fn download(
 
 /// Transcribes the meeting. `language` is a whisper code or "auto".
 pub fn transcribe(
+    engine: &crate::openrouter::Engine,
     mic: &[f32],
     computer: &[f32],
     language: &str,
@@ -564,7 +566,11 @@ pub fn transcribe(
     // in the room.
     let local = voices(&only(&mic, &mic_regions), events, abort)?;
     let remote = voices(&computer, events, abort)?;
-    let context = load_whisper(events, abort)?;
+    let context = if engine.backend == crate::openrouter::Backend::Whisper {
+        Some(load_whisper(events, abort)?)
+    } else {
+        None
+    };
 
     let length = |regions: &[Region]| regions.iter().map(|r| r.end - r.start).sum::<usize>();
     let total = (length(&mic_regions) + length(&computer_regions)).max(1) as f64;
@@ -588,7 +594,8 @@ pub fn transcribe(
         }
         let share = length(regions) as f64 / total;
         let (lines, found) = side_pass(
-            &context,
+            context.as_ref(),
+            &engine.options,
             track,
             regions,
             speakers,
@@ -725,6 +732,7 @@ fn voices(
 /// clustering decide, `Some(1)` skips finding speakers altogether. The lines
 /// are labelled "Speaker 1", "Speaker 2", ... in the order they first speak.
 pub fn transcribe_single(
+    engine: &crate::openrouter::Engine,
     track: &[f32],
     language: &str,
     speakers: Option<usize>,
@@ -758,6 +766,7 @@ pub fn transcribe_single(
     };
     let speakers = Speakers::Turns(turns);
     whisper_pass(
+        engine,
         &level,
         &regions,
         &speakers,
@@ -770,6 +779,7 @@ pub fn transcribe_single(
 
 /// The shared part: whisper over the stretches with sound, then the lines.
 fn whisper_pass(
+    engine: &crate::openrouter::Engine,
     mixed: &[f32],
     regions: &[Region],
     speakers: &Speakers,
@@ -778,9 +788,14 @@ fn whisper_pass(
     events: &Events,
     abort: &Abort,
 ) -> Result<Transcript, String> {
-    let context = load_whisper(events, abort)?;
+    let context = if engine.backend == crate::openrouter::Backend::Whisper {
+        Some(load_whisper(events, abort)?)
+    } else {
+        None
+    };
     let (segments, detected) = side_pass(
-        &context,
+        context.as_ref(),
+        &engine.options,
         mixed,
         regions,
         speakers,
@@ -829,7 +844,8 @@ fn load_whisper(events: &Events, abort: &Abort) -> Result<WhisperContext, String
 /// Progress runs from `progress.0` to `progress.1`.
 #[allow(clippy::too_many_arguments)]
 fn side_pass(
-    context: &WhisperContext,
+    context: Option<&WhisperContext>,
+    options: &serde_json::Value,
     track: &[f32],
     regions: &[Region],
     speakers: &Speakers,
@@ -841,12 +857,41 @@ fn side_pass(
 ) -> Result<(Vec<Segment>, Option<String>), String> {
     let glued = Glued::new(track, regions);
     emit(events, Event::Stage("Transcribing".into()));
-    let (words, detected) =
-        run_whisper(context, &glued, speakers, language, progress, events, abort)?;
-    Ok((
-        phrases(&words, &glued, speakers, track, paragraphs),
-        detected,
-    ))
+    let (words, detected) = if let Some(context) = context {
+        run_whisper(context, &glued, speakers, language, progress, events, abort)?
+    } else {
+        let (words, language) = crate::openrouter::transcribe(
+            options,
+            &glued.samples,
+            language,
+            progress,
+            events,
+            abort,
+        )?;
+        (
+            words
+                .into_iter()
+                .map(|w| Word {
+                    text: w.text,
+                    start_ms: w.start_ms,
+                    end_ms: w.end_ms,
+                    no_speech: 0.0,
+                    segment: 0,
+                })
+                .collect(),
+            language,
+        )
+    };
+    let lines = phrases(&words, &glued, speakers, track, paragraphs);
+    if context.is_none() {
+        for line in &lines {
+            emit(
+                events,
+                Event::Segment(format!("{}: {}", line.speaker, line.text)),
+            );
+        }
+    }
+    Ok((lines, detected))
 }
 
 /// A word with its times in the glued buffer, and how sure whisper was that
@@ -1260,9 +1305,17 @@ pub fn to_markdown(title: &str, date: &str, transcript: &Transcript) -> String {
 pub fn cli(args: &[String]) -> glib::ExitCode {
     let mut files = Vec::new();
     let mut language = "auto".to_owned();
+    let mut backend = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--backend" => match iter
+                .next()
+                .and_then(|s| crate::openrouter::Backend::parse(s).ok())
+            {
+                Some(value) => backend = Some(value),
+                None => return usage(),
+            },
             "--language" | "-l" => match iter.next() {
                 Some(code) => language = code.clone(),
                 None => return usage(),
@@ -1280,7 +1333,14 @@ pub fn cli(args: &[String]) -> glib::ExitCode {
     run_cli(|events, abort| {
         let mic = load_track(mic_path)?;
         let computer = load_track(computer_path)?;
-        transcribe(&mic, &computer, &language, events, abort)
+        transcribe(
+            &crate::openrouter::Backend::prepare(backend)?,
+            &mic,
+            &computer,
+            &language,
+            events,
+            abort,
+        )
     })
 }
 
@@ -1288,10 +1348,18 @@ pub fn cli(args: &[String]) -> glib::ExitCode {
 pub fn cli_file(args: &[String]) -> glib::ExitCode {
     let mut files = Vec::new();
     let mut language = "auto".to_owned();
+    let mut backend = None;
     let mut speakers = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--backend" => match iter
+                .next()
+                .and_then(|s| crate::openrouter::Backend::parse(s).ok())
+            {
+                Some(value) => backend = Some(value),
+                None => return usage(),
+            },
             "--language" | "-l" => match iter.next() {
                 Some(code) => language = code.clone(),
                 None => return usage(),
@@ -1312,7 +1380,14 @@ pub fn cli_file(args: &[String]) -> glib::ExitCode {
     };
     run_cli(|events, abort| {
         let track = load_track(path)?;
-        transcribe_single(&track, &language, speakers, events, abort)
+        transcribe_single(
+            &crate::openrouter::Backend::prepare(backend)?,
+            &track,
+            &language,
+            speakers,
+            events,
+            abort,
+        )
     })
 }
 
@@ -1367,10 +1442,10 @@ fn run_cli(work: impl FnOnce(&Events, &Abort) -> Result<Transcript, String>) -> 
 
 fn usage() -> glib::ExitCode {
     eprintln!(
-        "Usage: {APP_NAME} transcribe <mic> <computer> [--language auto|en|nl|...] [--model name]"
+        "Usage: {APP_NAME} transcribe <mic> <computer> [--backend whisper|openrouter] [--language auto|en|no|...] [--model name]"
     );
     eprintln!(
-        "       {APP_NAME} transcribe-file <audio> [--speakers N] [--language auto|en|nl|...] [--model name]"
+        "       {APP_NAME} transcribe-file <audio> [--speakers N] [--backend whisper|openrouter] [--language auto|en|no|...] [--model name]"
     );
     glib::ExitCode::from(2)
 }

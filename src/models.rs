@@ -102,17 +102,15 @@ pub fn configured() -> String {
     }
     std::fs::read_to_string(config_file())
         .ok()
-        .and_then(|text| {
-            text.lines().find_map(|line| {
-                let (key, value) = line.split_once('=')?;
-                (key.trim() == "model").then(|| {
-                    let value = value.split('#').next().unwrap_or("");
-                    value.trim().trim_matches('"').to_owned()
-                })
-            })
-        })
-        .filter(|name| !name.is_empty())
+        .and_then(|text| configured_from(&text))
         .unwrap_or_else(|| DEFAULT.to_owned())
+}
+
+fn configured_from(text: &str) -> Option<String> {
+    toml::from_str::<toml::Value>(text)
+        .ok()
+        .and_then(|config| config.get("model")?.as_str().map(str::to_owned))
+        .filter(|name| !name.is_empty())
 }
 
 fn known(name: &str) -> Option<&'static Model> {
@@ -200,6 +198,18 @@ pub fn dtw_preset() -> Option<DtwModelPreset> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloud_model_does_not_override_local_model() {
+        assert_eq!(
+            configured_from("[openrouter]\nmodel = \"example/stt\""),
+            None
+        );
+        assert_eq!(
+            configured_from("model = \"small\"\n[openrouter]\nmodel = \"example/stt\""),
+            Some("small".into())
+        );
+    }
 
     #[test]
     fn names_and_file_names_both_resolve() {
