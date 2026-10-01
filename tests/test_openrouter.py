@@ -17,6 +17,16 @@ def response(text='Hei', start=0.1, end=0.5):
 
 
 class MaiTests(unittest.TestCase):
+    def test_overlapping_utterances_preserve_text_order(self):
+        data = {'text':'First sentence. Second sentence.', 'words':[
+            {'word':'First','start':1.0,'end':1.3},
+            {'word':'sentence.','start':1.3,'end':1.8},
+            {'word':'Second','start':0.9,'end':1.2},
+            {'word':'sentence.','start':1.2,'end':1.5}]}
+        words = mai.normalize(data,3)['words']
+        self.assertEqual([w['text'] for w in words],['First','sentence.','Second','sentence.'])
+        self.assertEqual([w['start_ms'] for w in words],[1000,1300,900,1200])
+
     def test_real_times_not_speaker_guesses(self):
         data = response(); data['words'][0]['speaker'] = 5
         self.assertEqual(mai.normalize(data, 1)['words'], [{'text': 'Hei', 'start_ms': 100, 'end_ms': 500}])

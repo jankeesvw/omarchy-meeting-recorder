@@ -110,8 +110,9 @@ def normalize(response, duration):
     raw = response.get('words', [])
     if not isinstance(raw, list):
         raise ValueError('OpenRouter returned invalid word timestamps')
+    # Providers may return overlapping utterances in transcript order.
+    # Preserve that order: sorting individual words corrupts the sentences.
     words = []
-    previous = -1.0
     for word in raw:
         if not isinstance(word, dict):
             raise ValueError('OpenRouter returned an invalid word')
@@ -120,9 +121,8 @@ def normalize(response, duration):
         if (not isinstance(text, str) or not isinstance(start, (float, int))
                 or not isinstance(end, (float, int)) or isinstance(start, bool) or isinstance(end, bool)
                 or not math.isfinite(start) or not math.isfinite(end)
-                or start < 0 or end < start or start < previous or end > duration + 1):
+                or start < 0 or end < start or end > duration + 1):
             raise ValueError('OpenRouter returned invalid word timestamps')
-        previous = start
         if text.strip():
             words.append({'text': text.strip(), 'start_ms': round(min(start, duration) * 1000),
                           'end_ms': round(min(end, duration) * 1000)})

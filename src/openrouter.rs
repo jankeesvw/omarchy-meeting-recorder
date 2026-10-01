@@ -243,7 +243,6 @@ fn parse_words(
     duration_ms: i64,
 ) -> Result<(Vec<TimedWord>, Option<String>), String> {
     let mut words = Vec::new();
-    let mut previous = -1;
     for word in value["words"]
         .as_array()
         .ok_or("OpenRouter adapter returned no words")?
@@ -255,10 +254,9 @@ fn parse_words(
         let end = word["end_ms"]
             .as_i64()
             .ok_or("invalid OpenRouter timestamp")?;
-        if start < previous || start < 0 || end < start || end > duration_ms + 1 {
+        if start < 0 || end < start || end > duration_ms + 1 {
             return Err("invalid OpenRouter timestamp range".into());
         }
-        previous = start;
         if !text.trim().is_empty() {
             words.push(TimedWord {
                 text: text.into(),
@@ -273,6 +271,18 @@ fn parse_words(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn overlapping_utterances_keep_provider_text_order() {
+        let value = serde_json::json!({"words":[
+            {"text":"First.","start_ms":1000,"end_ms":1600},
+            {"text":"Second.","start_ms":900,"end_ms":1500}
+        ]});
+        let words = parse_words(&value, 2000).unwrap().0;
+        assert_eq!(words[0].text, "First.");
+        assert_eq!(words[1].text, "Second.");
+        assert_eq!(words[1].start_ms, 900);
+    }
+
     #[test]
     fn local_job_keeps_model_file_and_alignment_after_config_changes() {
         let path = std::env::temp_dir().join(format!("recorder-model-{}.bin", std::process::id()));

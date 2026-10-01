@@ -887,7 +887,10 @@ fn side_pass(
     } else {
         WordTiming::Provider
     };
-    let lines = phrases(&words, &glued, speakers, track, paragraphs, timing);
+    let mut lines = phrases(&words, &glued, speakers, track, paragraphs, timing);
+    if timing == WordTiming::Provider {
+        lines.sort_by_key(|line| line.start_ms);
+    }
     if context.is_none() {
         for line in &lines {
             emit(
@@ -1087,6 +1090,9 @@ fn phrases(
                     && !sentence_ended
                     && !turn_at_pause =>
             {
+                if timing == WordTiming::Provider {
+                    p.start_ms = p.start_ms.min(start);
+                }
                 p.words.push(word.text.clone());
                 p.end_ms = end.max(p.end_ms);
                 p.no_speech = p.no_speech.max(word.no_speech);
@@ -1135,6 +1141,9 @@ fn phrases(
                 if !ends_sentence(previous.words.last().map_or("", String::as_str))
                     && piece.start_ms - previous.end_ms < 3000 =>
             {
+                if timing == WordTiming::Provider {
+                    previous.start_ms = previous.start_ms.min(piece.start_ms);
+                }
                 previous.words.extend(piece.words);
                 previous.end_ms = piece.end_ms.max(previous.end_ms);
                 previous.no_speech = previous.no_speech.max(piece.no_speech);
@@ -1178,7 +1187,12 @@ fn phrases(
             {
                 last.text.push(' ');
                 last.text.push_str(&text);
-                last.end_ms = piece.end_ms;
+                if timing == WordTiming::Provider {
+                    last.start_ms = last.start_ms.min(piece.start_ms);
+                    last.end_ms = last.end_ms.max(piece.end_ms);
+                } else {
+                    last.end_ms = piece.end_ms;
+                }
             }
             _ => segments.push(Segment {
                 start_ms: piece.start_ms,
@@ -1471,6 +1485,46 @@ fn usage() -> glib::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlapping_provider_sentences_preserve_text_and_bounds() {
+        let track = vec![0.1; WHISPER_RATE * 3];
+        let glued = Glued::new(
+            &track,
+            &[Region {
+                start: 0,
+                onset: 0,
+                end: track.len(),
+            }],
+        );
+        let speakers = Speakers::Side("You", vec![]);
+        let words: Vec<Word> = [
+            ("First", 1000, 1300),
+            ("sentence.", 1300, 1800),
+            ("Second", 900, 1200),
+            ("sentence.", 1200, 1500),
+        ]
+        .into_iter()
+        .map(|(text, start_ms, end_ms)| Word {
+            text: text.into(),
+            start_ms,
+            end_ms,
+            no_speech: 0.0,
+            segment: 0,
+        })
+        .collect();
+        let out = phrases(
+            &words,
+            &glued,
+            &speakers,
+            &track,
+            true,
+            WordTiming::Provider,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].text, "First sentence. Second sentence.");
+        assert_eq!((out[0].start_ms, out[0].end_ms), (900, 1800));
+    }
 
     #[test]
     fn provider_start_is_not_snapped_to_voice_onset() {
