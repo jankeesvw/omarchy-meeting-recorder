@@ -149,6 +149,16 @@ struct State {
     chapters: Vec<(i64, String)>,
 }
 
+impl State {
+    fn relocate(&mut self, from: &Path, to: &Path) {
+        for path in &mut self.files {
+            if let Ok(relative) = path.strip_prefix(from) {
+                *path = to.join(relative);
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Player {
     root: gtk::Box,
@@ -297,6 +307,12 @@ impl Player {
             this.wave.queue_draw();
         });
         self.refresh();
+    }
+
+    /// Follow a folder rename without resetting position, chapters or playback.
+    /// Existing decoder processes retain their open files across the rename.
+    pub fn relocate(&self, from: &Path, to: &Path) {
+        self.state.borrow_mut().relocate(from, to);
     }
 
     /// Shows chapter markers on the waveform; empty removes them.
@@ -562,5 +578,33 @@ fn clock(secs: i64) -> String {
         format!("{h}:{m:02}:{s:02}")
     } else {
         format!("{m:02}:{s:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rename_updates_playback_paths_and_preserves_position_and_chapters() {
+        let from = Path::new("/meetings/Old");
+        let to = Path::new("/meetings/New");
+        let mut state = State {
+            files: vec![from.join("mic.ogg"), from.join("computer.ogg")],
+            paused_at_us: 12_000_000,
+            duration_us: 60_000_000,
+            chapters: vec![(1000, "Intro".into())],
+            ..Default::default()
+        };
+        state.relocate(from, to);
+        assert_eq!(
+            state.files,
+            vec![to.join("mic.ogg"), to.join("computer.ogg")]
+        );
+        assert_eq!(state.paused_at_us, 12_000_000);
+        assert_eq!(state.duration_us, 60_000_000);
+        assert_eq!(state.chapters, vec![(1000, "Intro".into())]);
+        state.relocate(to, Path::new("/meetings/Final"));
+        assert_eq!(state.files[0], Path::new("/meetings/Final/mic.ogg"));
     }
 }

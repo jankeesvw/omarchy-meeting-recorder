@@ -3032,6 +3032,7 @@ impl Recorder {
                 self.toast(&format!("Could not rename the folder: {e}"));
                 return;
             }
+            self.player.relocate(&current, &target);
             *self.result_dir.borrow_mut() = Some(target.clone());
             self.render();
         }
