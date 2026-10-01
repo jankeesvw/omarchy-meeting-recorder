@@ -200,28 +200,32 @@ impl Hub {
     }
 
     /// A command from the socket: `omarchy-meeting-recorder start` and friends.
-    fn command(self: &Rc<Self>, app: &adw::Application, command: &str) {
-        if command == "new-window" {
+    fn command(self: &Rc<Self>, app: &adw::Application, command: ipc::Command) {
+        if matches!(command, ipc::Command::NewWindow) {
             self.add_window(app).window.present();
             return;
         }
-        let r = match command {
+        let r = match &command {
             // Starting takes a window that is free, so a meeting being
             // transcribed stays on screen.
-            "start" => self.recording().unwrap_or_else(|| self.free_window(app)),
+            ipc::Command::Start(_) => self.recording().unwrap_or_else(|| self.free_window(app)),
             _ => self.target(app),
         };
         match command {
             // A name typed on the ready page is kept; from the done page
-            // it starts fresh.
-            "start" if r.state.get() == State::Idle => r.start(),
-            "start" if r.state.get() == State::Done => {
-                r.ready();
+            // it starts fresh. `--name` replaces either one.
+            ipc::Command::Start(name) if r.state.get() == State::Idle => {
+                r.use_start_name(name);
                 r.start();
             }
-            "stop" => r.stop(),
-            "compact" => r.set_compact(!r.compact.get()),
-            "pause" => r.toggle_pause(),
+            ipc::Command::Start(name) if r.state.get() == State::Done => {
+                r.ready();
+                r.use_start_name(name);
+                r.start();
+            }
+            ipc::Command::Stop => r.stop(),
+            ipc::Command::Compact => r.set_compact(!r.compact.get()),
+            ipc::Command::Pause => r.toggle_pause(),
             _ => {}
         }
     }
@@ -1836,6 +1840,13 @@ impl Recorder {
         self.compact_timer.set_label("00:00");
         self.set_state(State::Idle);
         self.update_model_banner();
+    }
+
+    /// `--name` replaces the meeting name. No name leaves a typed one in place.
+    fn use_start_name(&self, name: Option<String>) {
+        if let Some(name) = name {
+            self.title_row.set_text(&name);
+        }
     }
 
     fn start(self: &Rc<Self>) {

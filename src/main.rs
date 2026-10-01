@@ -25,6 +25,26 @@ use gtk::glib;
 pub const APP_ID: &str = "com.jankeesvw.OmarchyMeetingRecorder";
 pub const APP_NAME: &str = "omarchy-meeting-recorder";
 
+/// `omarchy-meeting-recorder start [--name TEXT]`. A bare start is what a
+/// keybinding sends. The name is the next argument, as with `--language`.
+fn start_command() -> glib::ExitCode {
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    match ipc::parse_start_args(&args) {
+        Ok(name) => {
+            if ipc::send_start(name.as_deref()) {
+                glib::ExitCode::SUCCESS
+            } else {
+                eprintln!("{APP_NAME}: the recorder is not running");
+                glib::ExitCode::FAILURE
+            }
+        }
+        Err(()) => {
+            eprintln!("Usage: {APP_NAME} start [--name TEXT]");
+            glib::ExitCode::from(2)
+        }
+    }
+}
+
 fn main() -> glib::ExitCode {
     match std::env::args().nth(1).as_deref() {
         None => ui::run(None),
@@ -41,7 +61,8 @@ fn main() -> glib::ExitCode {
             ipc::watch();
             glib::ExitCode::SUCCESS
         }
-        Some(command @ ("start" | "stop" | "compact" | "pause")) => {
+        Some("start") => start_command(),
+        Some(command @ ("stop" | "compact" | "pause")) => {
             if ipc::send(command) {
                 glib::ExitCode::SUCCESS
             } else {
@@ -71,7 +92,9 @@ fn main() -> glib::ExitCode {
             println!();
             println!("  (no command)  open the recorder, ready to record");
             println!("  <meeting>     open a .meeting-recorder file or a meeting folder");
-            println!("  start         start recording in the open window (for a keybinding)");
+            println!(
+                "  start         start recording in the open window; --name TEXT sets the meeting name"
+            );
             println!("  stop          stop the running recording (for a keybinding)");
             println!("  compact       switch the recording window between full and compact");
             println!("  pause         pause or resume the running recording");

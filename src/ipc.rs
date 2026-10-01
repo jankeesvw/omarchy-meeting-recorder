@@ -77,17 +77,79 @@ pub fn now() -> i64 {
         .unwrap_or(0)
 }
 
-/// Commands a client may send, one per line.
-pub const COMMANDS: [&str; 5] = ["start", "stop", "compact", "pause", "new-window"];
+/// A meeting name from `start --name`. Longer than this is refused by the
+/// CLI and cut on the socket, so one line cannot set an unbounded title.
+pub const MAX_NAME: usize = 200;
+
+/// A command from the socket. `start` alone keeps a name already typed;
+/// `start` followed by the rest of the line replaces it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    Start(Option<String>),
+    Stop,
+    Compact,
+    Pause,
+    NewWindow,
+}
+
+/// One socket line. `start Design review` carries the name, spaces included.
+/// A blank name is the same as a bare `start`. Anything else is ignored.
+pub fn parse_line(line: &str) -> Option<Command> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    if let Some(rest) = line.strip_prefix("start ") {
+        return Some(Command::Start(clean_name(rest)));
+    }
+    match line.trim() {
+        "start" => Some(Command::Start(None)),
+        "stop" => Some(Command::Stop),
+        "compact" => Some(Command::Compact),
+        "pause" => Some(Command::Pause),
+        "new-window" => Some(Command::NewWindow),
+        _ => None,
+    }
+}
+
+/// Arguments after `start`. `Ok(None)` is a bare start, or `--name` with a
+/// blank value. A missing value, an unknown flag, a control character, or a
+/// name past `MAX_NAME` is `Err`.
+pub fn parse_start_args(args: &[String]) -> Result<Option<String>, ()> {
+    let mut name = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--name" | "-n" => {
+                let Some(value) = iter.next() else {
+                    return Err(());
+                };
+                if value.chars().count() > MAX_NAME || value.chars().any(|c| c.is_control()) {
+                    return Err(());
+                }
+                name = clean_name(value);
+            }
+            _ => return Err(()),
+        }
+    }
+    Ok(name)
+}
+
+/// `None` when there is nothing to set. Control characters are dropped here
+/// too: the CLI refuses them, and a socket line should not start under one.
+fn clean_name(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    Some(trimmed.chars().take(MAX_NAME).collect())
+}
 
 /// Starts the socket server. Called once, from the primary instance. Clients
-/// get the state lines of the busiest window; a line a client writes that
-/// names one of `COMMANDS` is passed on to `commands`.
+/// get the state lines of the busiest window; a command line a client writes
+/// is passed on to `commands`.
 pub fn serve(
     statuses: Statuses,
     mic: Source,
     system: Source,
-    commands: async_channel::Sender<&'static str>,
+    commands: async_channel::Sender<Command>,
 ) {
     let path = socket_path();
     // A socket file left behind by a crash refuses new binds; nobody answers on it.
@@ -159,15 +221,16 @@ pub fn serve(
     });
 }
 
-fn read_commands(stream: UnixStream, commands: &async_channel::Sender<&'static str>) {
+fn read_commands(stream: UnixStream, commands: &async_channel::Sender<Command>) {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     loop {
         line.clear();
         match reader.by_ref().take(MAX_LINE as u64).read_line(&mut line) {
             Ok(0) | Err(_) => return,
+            Ok(_) if !line.ends_with('\n') => return, // over-long line: not ours
             Ok(_) => {
-                if let Some(command) = COMMANDS.iter().find(|c| **c == line.trim()) {
+                if let Some(command) = parse_line(&line) {
                     let _ = commands.send_blocking(command);
                 }
             }
@@ -175,12 +238,28 @@ fn read_commands(stream: UnixStream, commands: &async_channel::Sender<&'static s
     }
 }
 
-/// `omarchy-meeting-recorder stop`: ask the running app to stop recording.
-pub fn send(command: &str) -> bool {
+fn send_line(line: &str) -> bool {
     match UnixStream::connect(socket_path()) {
-        Ok(mut stream) => stream.write_all(format!("{command}\n").as_bytes()).is_ok(),
+        Ok(mut stream) => stream.write_all(line.as_bytes()).is_ok(),
         Err(_) => false,
     }
+}
+
+/// `omarchy-meeting-recorder stop`: ask the running app to stop recording.
+pub fn send(command: &str) -> bool {
+    send_line(&format!("{command}\n"))
+}
+
+/// `omarchy-meeting-recorder start --name`: bare `start` when there is no name.
+pub fn send_start(name: Option<&str>) -> bool {
+    let Some(name) = name.and_then(clean_name) else {
+        return send_line("start\n");
+    };
+    let line = format!("start {name}\n");
+    if line.len() > MAX_LINE {
+        return false;
+    }
+    send_line(&line)
 }
 
 fn round(value: f64) -> f64 {
@@ -248,5 +327,53 @@ mod tests {
             .unwrap()
             .push(status("recording", "Standup"));
         assert_eq!(busiest(&statuses).title, "Standup");
+    }
+
+    #[test]
+    fn a_bare_start_keeps_the_typed_name() {
+        assert_eq!(parse_line("start\n"), Some(Command::Start(None)));
+        assert_eq!(parse_line("start"), Some(Command::Start(None)));
+        assert_eq!(parse_start_args(&[]), Ok(None));
+    }
+
+    #[test]
+    fn a_start_line_carries_a_name_with_spaces() {
+        assert_eq!(
+            parse_line("start Design review\n"),
+            Some(Command::Start(Some("Design review".into())))
+        );
+        assert_eq!(
+            parse_start_args(&["--name".into(), "Design review".into()]),
+            Ok(Some("Design review".into()))
+        );
+        assert_eq!(
+            parse_start_args(&["-n".into(), "Design review".into()]),
+            Ok(Some("Design review".into()))
+        );
+    }
+
+    #[test]
+    fn an_empty_name_is_a_bare_start() {
+        assert_eq!(parse_line("start   \n"), Some(Command::Start(None)));
+        assert_eq!(parse_start_args(&["--name".into(), "  ".into()]), Ok(None));
+    }
+
+    #[test]
+    fn a_missing_value_or_unknown_flag_is_refused() {
+        assert!(parse_start_args(&["--name".into()]).is_err());
+        assert!(parse_start_args(&["--meeting-name".into(), "Design review".into()]).is_err());
+        assert!(parse_start_args(&["--name".into(), "a\nb".into()]).is_err());
+        assert!(parse_start_args(&["--name".into(), "n".repeat(MAX_NAME + 1)]).is_err());
+        assert_eq!(parse_line("pause\n"), Some(Command::Pause));
+        assert_eq!(parse_line("nope\n"), None);
+    }
+
+    #[test]
+    fn a_long_socket_name_is_capped() {
+        let line = format!("start {}\n", "n".repeat(MAX_NAME + 5));
+        let Some(Command::Start(Some(name))) = parse_line(&line) else {
+            panic!("expected a capped name");
+        };
+        assert_eq!(name.chars().count(), MAX_NAME);
     }
 }
