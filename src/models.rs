@@ -106,6 +106,22 @@ pub fn configured() -> String {
         .unwrap_or_else(|| DEFAULT.to_owned())
 }
 
+/// Select from the job's config snapshot, preserving the CLI override.
+pub fn selected(config: &toml::Value) -> String {
+    OVERRIDE
+        .lock()
+        .unwrap()
+        .clone()
+        .or_else(|| {
+            config
+                .get("model")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| DEFAULT.to_owned())
+}
+
 fn configured_from(text: &str) -> Option<String> {
     toml::from_str::<toml::Value>(text)
         .ok()
@@ -138,14 +154,17 @@ fn usable(path: &Path, model: Option<&Model>) -> bool {
 
 /// The configured model's file, when it is on disk.
 pub fn find() -> Option<PathBuf> {
-    let name = configured();
-    match known(&name) {
+    find_named(&configured())
+}
+
+fn find_named(name: &str) -> Option<PathBuf> {
+    match known(name) {
         Some(model) => [models_dir(), data_dir().join("voxtype/models")]
             .into_iter()
             .map(|dir| dir.join(file_name(model)))
             .find(|path| usable(path, Some(model))),
         None => {
-            let path = PathBuf::from(&name);
+            let path = PathBuf::from(name);
             usable(&path, None).then_some(path)
         }
     }
@@ -162,12 +181,16 @@ pub fn missing() -> Option<(String, u32)> {
 
 /// The model file, downloaded first when needed. Blocking.
 pub fn ensure(events: &Events, abort: &Abort) -> Result<PathBuf, String> {
+    ensure_named(&configured(), events, abort)
+}
+
+/// Resolve and download the model selected at job start, without rereading config.
+pub fn ensure_named(name: &str, events: &Events, abort: &Abort) -> Result<PathBuf, String> {
     let _one_at_a_time = DOWNLOADING.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(path) = find() {
+    if let Some(path) = find_named(name) {
         return Ok(path);
     }
-    let name = configured();
-    let Some(model) = known(&name) else {
+    let Some(model) = known(name) else {
         let names: Vec<&str> = MODELS.iter().map(|m| m.name).collect();
         return Err(format!(
             "unknown model \"{name}\": use one of {} or a path to a model file",
@@ -191,8 +214,8 @@ pub fn ensure(events: &Events, abort: &Abort) -> Result<PathBuf, String> {
 }
 
 /// The attention-head preset for word times; None for a model file of unknown kind.
-pub fn dtw_preset() -> Option<DtwModelPreset> {
-    known(&configured()).map(|m| m.preset.clone())
+pub fn dtw_preset(name: &str) -> Option<DtwModelPreset> {
+    known(name).map(|m| m.preset.clone())
 }
 
 #[cfg(test)]

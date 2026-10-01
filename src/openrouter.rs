@@ -82,7 +82,7 @@ impl Backend {
                 .unwrap_or(MODEL)
                 .to_owned()
         } else {
-            crate::models::configured()
+            crate::models::selected(config)
         };
         Ok(Engine {
             backend: self,
@@ -273,6 +273,34 @@ fn parse_words(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_job_keeps_model_file_and_alignment_after_config_changes() {
+        let path = std::env::temp_dir().join(format!("recorder-model-{}.bin", std::process::id()));
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(10_000_000)
+            .unwrap();
+        let mut config = toml::Value::Table(Default::default());
+        config.as_table_mut().unwrap().insert(
+            "model".into(),
+            toml::Value::String(path.to_str().unwrap().into()),
+        );
+        let engine = Backend::Whisper.prepare_config(&config).unwrap();
+        config["model"] = toml::Value::String("small".into());
+        let (events, _) = async_channel::unbounded();
+        let loaded =
+            crate::models::ensure_named(&engine.model, &events, &Abort::default()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(loaded, path);
+        assert!(crate::models::dtw_preset(&engine.model).is_none());
+        let config = toml::from_str::<toml::Value>("model='tiny'").unwrap();
+        let engine = Backend::Whisper.prepare_config(&config).unwrap();
+        assert!(matches!(
+            crate::models::dtw_preset(&engine.model),
+            Some(whisper_rs::DtwModelPreset::Tiny)
+        ));
+    }
+
     #[test]
     fn unknown_backend_is_an_error_unless_explicitly_overridden() {
         let config = toml::from_str::<toml::Value>("backend='openroutr'").unwrap();

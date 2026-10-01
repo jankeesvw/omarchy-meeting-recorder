@@ -567,7 +567,7 @@ pub fn transcribe(
     let local = voices(&only(&mic, &mic_regions), events, abort)?;
     let remote = voices(&computer, events, abort)?;
     let context = if engine.backend == crate::openrouter::Backend::Whisper {
-        Some(load_whisper(events, abort)?)
+        Some(load_whisper(&engine.model, events, abort)?)
     } else {
         None
     };
@@ -789,7 +789,7 @@ fn whisper_pass(
     abort: &Abort,
 ) -> Result<Transcript, String> {
     let context = if engine.backend == crate::openrouter::Backend::Whisper {
-        Some(load_whisper(events, abort)?)
+        Some(load_whisper(&engine.model, events, abort)?)
     } else {
         None
     };
@@ -817,8 +817,8 @@ fn whisper_pass(
     })
 }
 
-fn load_whisper(events: &Events, abort: &Abort) -> Result<WhisperContext, String> {
-    let model = crate::models::ensure(events, abort)?;
+fn load_whisper(name: &str, events: &Events, abort: &Abort) -> Result<WhisperContext, String> {
+    let model = crate::models::ensure_named(name, events, abort)?;
     if abort.load(Ordering::Relaxed) {
         return Err(CANCELLED.into());
     }
@@ -830,7 +830,7 @@ fn load_whisper(events: &Events, abort: &Abort) -> Result<WhisperContext, String
     // Word times aligned on the attention heads (DTW): the plain token times
     // drift by up to a second, too much to tell where one speaker takes over.
     // A model file of unknown kind gets plain token times.
-    if let Some(model_preset) = crate::models::dtw_preset() {
+    if let Some(model_preset) = crate::models::dtw_preset(name) {
         context_params.dtw_parameters(DtwParameters {
             mode: DtwMode::ModelPreset { model_preset },
             ..Default::default()
@@ -882,7 +882,12 @@ fn side_pass(
             language,
         )
     };
-    let lines = phrases(&words, &glued, speakers, track, paragraphs);
+    let timing = if context.is_some() {
+        WordTiming::Whisper
+    } else {
+        WordTiming::Provider
+    };
+    let lines = phrases(&words, &glued, speakers, track, paragraphs, timing);
     if context.is_none() {
         for line in &lines {
             emit(
@@ -1029,6 +1034,12 @@ const PARAGRAPH_PAUSE_MS: i64 = 3000;
 /// Very long turns are still split, so a line stays a useful place to jump to.
 const PARAGRAPH_MAX_MS: i64 = 90_000;
 
+#[derive(Clone, Copy, PartialEq)]
+enum WordTiming {
+    Whisper,
+    Provider,
+}
+
 /// Groups the words into the lines of the transcript: a new line where the
 /// speaker changes, where a sentence ends on another speaker, and at every
 /// stretch of silence. Timestamps are put back on the real timeline.
@@ -1038,6 +1049,7 @@ fn phrases(
     speakers: &Speakers,
     mixed: &[f32],
     paragraphs: bool,
+    timing: WordTiming,
 ) -> Vec<Segment> {
     struct Phrase {
         words: Vec<String>,
@@ -1094,6 +1106,9 @@ fn phrases(
     // tends to put them at the start of the padding instead.
     let mut previous_region = usize::MAX;
     for piece in &mut pieces {
+        if timing == WordTiming::Provider {
+            continue; // Provider word times already describe actual speech.
+        }
         if piece.region != previous_region
             && let Some((_, region)) = glued.map.get(piece.region)
         {
@@ -1143,7 +1158,10 @@ fn phrases(
         // guessed; keep the order of lines intact.
         let mut piece = piece;
         let changed = segments.last().is_none_or(|last| last.speaker != speaker);
-        if changed && let Some(start) = speakers.takeover_ms(&speaker, piece.start_ms) {
+        if timing == WordTiming::Whisper
+            && changed
+            && let Some(start) = speakers.takeover_ms(&speaker, piece.start_ms)
+        {
             let floor = segments.last().map_or(0, |last| last.start_ms + 1);
             piece.start_ms = start.max(floor);
             piece.end_ms = piece.end_ms.max(piece.start_ms + 1);
@@ -1453,6 +1471,102 @@ fn usage() -> glib::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_start_is_not_snapped_to_voice_onset() {
+        let track = vec![0.1; WHISPER_RATE * 3];
+        let glued = Glued::new(
+            &track,
+            &[Region {
+                start: 0,
+                onset: 0,
+                end: track.len(),
+            }],
+        );
+        let speakers = Speakers::Turns(vec![crate::diarize::Turn {
+            start_ms: 0,
+            end_ms: 3000,
+            speaker: 0,
+        }]);
+        let words = vec![Word {
+            text: "Hello.".into(),
+            start_ms: 500,
+            end_ms: 900,
+            no_speech: 0.0,
+            segment: 0,
+        }];
+        let out = phrases(
+            &words,
+            &glued,
+            &speakers,
+            &track,
+            false,
+            WordTiming::Provider,
+        );
+        assert_eq!((out[0].start_ms, out[0].end_ms), (500, 900));
+    }
+
+    #[test]
+    fn provider_word_times_preserve_speaker_and_duration() {
+        let track = vec![0.1; WHISPER_RATE * 3];
+        let glued = Glued::new(
+            &track,
+            &[Region {
+                start: 0,
+                onset: 0,
+                end: track.len(),
+            }],
+        );
+        let speakers = Speakers::Turns(vec![
+            crate::diarize::Turn {
+                start_ms: 0,
+                end_ms: 1000,
+                speaker: 0,
+            },
+            crate::diarize::Turn {
+                start_ms: 1000,
+                end_ms: 3000,
+                speaker: 1,
+            },
+        ]);
+        let words: Vec<Word> = (0..10)
+            .map(|i| Word {
+                text: if i == 9 {
+                    "word.".into()
+                } else {
+                    "word".into()
+                },
+                start_ms: i * 100,
+                end_ms: (i + 1) * 100,
+                no_speech: 0.0,
+                segment: 0,
+            })
+            .collect();
+        let out = phrases(
+            &words,
+            &glued,
+            &speakers,
+            &track,
+            false,
+            WordTiming::Provider,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].start_ms, out[0].end_ms), (0, 1000));
+        assert_eq!(
+            out[0].speaker, "Speaker 1",
+            "actual output: {}–{} ms",
+            out[0].start_ms, out[0].end_ms
+        );
+        let whisper = phrases(
+            &words,
+            &glued,
+            &speakers,
+            &track,
+            false,
+            WordTiming::Whisper,
+        );
+        assert_eq!(whisper[0].end_ms, 2500);
+    }
 
     fn line(start_ms: i64, speaker: &str, text: &str) -> Segment {
         Segment {
