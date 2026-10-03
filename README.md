@@ -1,8 +1,8 @@
 # Meeting Recorder
 
-A meeting recorder for [Omarchy](https://omarchy.org). It records your microphone and the computer audio as two tracks, and when you stop you get a transcript with speakers, chapters and a player. You can also drop in a recording you already have. Everything is transcribed on your own machine.
+A meeting recorder for [Omarchy](https://omarchy.org). It records your microphone and the computer audio as two tracks, and when you stop you get a transcript with speakers, chapters and a player. You can also drop in a recording you already have. Whisper transcribes on your own machine by default; optional cloud transcription runs through OpenRouter.
 
-No bot joins your call, and no audio leaves your computer. It works with any meeting app, because it simply listens to what your computer plays and what you say.
+No bot joins your call. With Whisper selected, no audio leaves your computer. It works with any meeting app, because it simply listens to what your computer plays and what you say.
 
 ![The done screen in Tokyo Night: chapters on the left, the transcript on the right, a waveform player above it](screenshots/hero.webp)
 
@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/jankeesvw/omarchy-meeting-recorder/
 
 Either way `sudo pacman -R omarchy-meeting-recorder-bin` removes it again.
 
-Then open **Meeting Recorder** from the launcher. The first transcription downloads the whisper model (about 1.6 GB, once), and the app shows you how far along it is. It offers to put a live waveform in your bar the first time, and the package prints the Hyprland rules for a floating window (also [below](#build-from-source)).
+Then open **Meeting Recorder** from the launcher. The first Whisper transcription downloads the whisper model (about 1.6 GB, once), and the app shows you how far along it is. It offers to put a live waveform in your bar the first time, and the package prints the Hyprland rules for a floating window (also [below](#build-from-source)).
 
 Prefer to build it yourself? See [Build from source](#build-from-source), or grab the binary from the [latest release](https://github.com/jankeesvw/omarchy-meeting-recorder/releases/latest).
 
@@ -181,9 +181,14 @@ Your own scripts, picked from the **Actions** menu on the done page: store the t
 
 `bench/` holds a small test suite: recordings of calls with people talking at once, echo through speakers, two people at one mic, music in the background and silence, plus a real meeting from the AMI corpus. `bench/run.py` runs the app over them and scores the transcript and the speakers; CI runs it on every pull request and posts the scores there. See [bench/README.md](bench/README.md).
 
+
+## Optional cloud transcription
+
+Whisper remains the default. You can also configure **OpenRouter** to send audio to a paid cloud transcription service. See [setup, privacy and API key storage](docs/openrouter.md).
+
 ## Privacy
 
-The audio, the transcript and everything else stay on your computer. The only thing that leaves it is the transcript text for the chapters, and only when you have set a default agent: it goes to that agent's service, the one you already chose and pay for. No agent, no chapters, nothing sent. Actions are yours: they send whatever your scripts send, and only when you pick one.
+With Whisper selected, transcription runs locally. Setting `backend = "openrouter"` uploads audio to OpenRouter and the selected provider and incurs API charges; see [OpenRouter setup and privacy](docs/openrouter.md). Chapter generation sends transcript text to your configured agent's service; without a default agent, automatic chapters are disabled. Actions are yours: they send whatever your scripts send, and only when you pick one.
 
 ## Requirements
 
