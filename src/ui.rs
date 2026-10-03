@@ -14,11 +14,12 @@ use gtk::{gio, glib};
 
 use crate::agent::{self, Agent};
 use crate::animation::TranscribeAnimation;
-use crate::audio::{HISTORY, Source, to_meter};
+use crate::audio::{self, Devices, HISTORY, Role, Source, to_meter};
 use crate::chapters::{self, Chapter};
 use crate::export::{self, Format, export_audio, export_tracks};
 use crate::ipc::{self, SharedStatus, Status};
 use crate::meeting::{self, Manifest};
+use crate::picker::Picker;
 use crate::player::Player;
 use crate::transcribe::{self, Abort, CANCELLED, Event, LANGUAGES};
 use crate::{APP_ID, APP_NAME, settings};
@@ -80,16 +81,20 @@ struct Hub {
     /// only hold weak references, so this is what keeps a window's recorder
     /// alive until the window is gone.
     windows: RefCell<Vec<Rc<Recorder>>>,
+    /// The microphones and outputs for the menus, `None` until first listed.
+    devices: RefCell<Option<Devices>>,
 }
 
 impl Hub {
     fn new(app: &adw::Application) -> Rc<Self> {
         let hub = Rc::new(Hub {
-            mic: Source::spawn("@DEFAULT_SOURCE@"),
-            system: Source::spawn("@DEFAULT_MONITOR@"),
+            mic: Source::spawn(settings::device_to_record(Role::Mic)),
+            system: Source::spawn(settings::device_to_record(Role::System)),
             statuses: ipc::Statuses::default(),
             windows: RefCell::default(),
+            devices: RefCell::default(),
         });
+        hub.watch_devices();
         let (commands_tx, commands_rx) = async_channel::unbounded();
         ipc::serve(
             hub.statuses.clone(),
@@ -130,6 +135,43 @@ impl Hub {
         });
         app.add_action(&quit);
         hub
+    }
+
+    /// Lists the devices now and again whenever one comes or goes, so a
+    /// headset plugged in shows up in the menus.
+    fn watch_devices(self: &Rc<Self>) {
+        let (changed_tx, changed) = async_channel::bounded(1);
+        let _ = changed_tx.try_send(());
+        audio::watch_devices(move || {
+            !matches!(
+                changed_tx.try_send(()),
+                Err(async_channel::TrySendError::Closed(_))
+            )
+        });
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            while changed.recv().await.is_ok() {
+                // Changes come in bursts: list once they have settled.
+                glib::timeout_future(Duration::from_millis(150)).await;
+                let _ = changed.try_recv();
+                let Ok(devices) = gio::spawn_blocking(audio::devices).await else {
+                    continue;
+                };
+                let Some(hub) = weak.upgrade() else {
+                    break;
+                };
+                *hub.devices.borrow_mut() = Some(devices);
+                hub.update_pickers();
+            }
+        });
+    }
+
+    /// Shows the devices, and the ones being recorded, in every window.
+    fn update_pickers(&self) {
+        let devices = self.devices.borrow();
+        for recorder in self.recorders() {
+            recorder.update_pickers(devices.as_ref());
+        }
     }
 
     fn add_window(self: &Rc<Self>, app: &adw::Application) -> Rc<Recorder> {
@@ -347,6 +389,8 @@ struct Recorder {
 
     mic: Source,
     system: Source,
+    /// The menus that pick the microphone and the output to record.
+    pickers: [Rc<Picker>; 2],
     shared: SharedStatus,
     hub: std::rc::Weak<Hub>,
 
@@ -460,8 +504,17 @@ impl Recorder {
             .orientation(gtk::Orientation::Vertical)
             .spacing(18)
             .build();
-        meters_box.append(&meter_block("You (microphone)", &meters[0]));
-        meters_box.append(&meter_block("Computer audio", &meters[1]));
+        let picker = |source: &Source, role| {
+            let hub = Rc::downgrade(hub);
+            Picker::new(source, role, move || {
+                if let Some(hub) = hub.upgrade() {
+                    hub.update_pickers();
+                }
+            })
+        };
+        let pickers = [picker(&mic, Role::Mic), picker(&system, Role::System)];
+        meters_box.append(&meter_block("You (microphone)", &meters[0], &pickers[0]));
+        meters_box.append(&meter_block("Computer audio", &meters[1], &pickers[1]));
 
         content.append(&meters_box);
 
@@ -803,6 +856,7 @@ impl Recorder {
             current_line: Cell::new(-1),
             mic,
             system,
+            pickers,
             shared,
             hub: Rc::downgrade(hub),
             state: Cell::new(State::Idle),
@@ -1193,6 +1247,17 @@ impl Recorder {
             }
             None => glib::ControlFlow::Break,
         });
+
+        if let Some(hub) = self.hub.upgrade() {
+            self.update_pickers(hub.devices.borrow().as_ref());
+        }
+    }
+
+    /// `None` before the devices are first listed.
+    fn update_pickers(&self, devices: Option<&Devices>) {
+        for picker in &self.pickers {
+            picker.update(devices);
+        }
     }
 
     /// The Actions menu from config.toml, and the button only when there are any.
@@ -1387,9 +1452,7 @@ impl Recorder {
             State::Recording if self.paused.get() => {
                 "Paused. Nothing is recorded until you resume.".to_owned()
             }
-            State::Recording => {
-                "Recording. Name, audio file and language can still be changed.".to_owned()
-            }
+            State::Recording => "Recording. Everything above can still be changed.".to_owned(),
             State::Stopping => "Saving the audio…".to_owned(),
             State::Transcribing => "Transcribing the meeting on this computer…".to_owned(),
             State::Done => String::new(),
@@ -3470,7 +3533,8 @@ fn parse_segment(line: &str) -> Option<(&str, &str, &str)> {
 }
 
 /// The few styles libadwaita does not have: a see-through header bar over the
-/// animation, and the transcript card.
+/// animation, the transcript card, and the device menus as quiet as the
+/// values of the rows above them.
 fn load_css() {
     let provider = gtk::CssProvider::new();
     provider.load_from_string(
@@ -3495,7 +3559,9 @@ fn load_css() {
          .transcript-editor { background: alpha(currentColor, 0.06); border-radius: 6px; padding: 4px 6px; }
          .transcript-editor text { background: transparent; }
          .done-icon { color: @accent_color; }
-         .player { padding: 6px 14px 6px 6px; }",
+         .player { padding: 6px 14px 6px 6px; }
+         dropdown.picker > button { background: transparent; box-shadow: none; font-weight: normal; }
+         dropdown.picker > button:hover, dropdown.picker > button:checked { background: alpha(currentColor, 0.07); }",
     );
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
@@ -3634,23 +3700,28 @@ fn meter(
     area
 }
 
-fn meter_block(name: &str, meter: &gtk::DrawingArea) -> gtk::Box {
+fn meter_block(name: &str, meter: &gtk::DrawingArea, picker: &Picker) -> gtk::Box {
     let block = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(6)
         .build();
-    block.append(
+    let header = gtk::Box::builder().spacing(6).build();
+    header.append(
         &gtk::Label::builder()
             .label(name)
             .xalign(0.0)
+            .hexpand(true)
             .css_classes(["heading"])
             .build(),
     );
+    header.append(&picker.dropdown);
+    block.append(&header);
     block.append(
         &gtk::Frame::builder()
             .child(meter)
             .css_classes(["card"])
             .build(),
     );
+    block.append(&picker.warning);
     block
 }

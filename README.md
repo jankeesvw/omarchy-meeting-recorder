@@ -36,15 +36,15 @@ Prefer to build it yourself? See [Build from source](#build-from-source), or gra
 
 ### Checks the sound before you start
 
-The app opens ready, not recording. The two meters are live from the start, a still line that thickens as sound comes in, so you can see that both your microphone and the computer audio arrive before the meeting begins. Type a name if you like (otherwise it becomes "Meeting 14:30"), pick the audio format and the transcript language, and press **Start recording**.
+The app opens ready, not recording. The two meters are live from the start, a still line that thickens as sound comes in, so you can see that both your microphone and the computer audio arrive before the meeting begins. Above each meter a menu picks the device: System default, or a microphone and an output of your own, say the headset your meeting app uses while the speakers stay the default. It can be changed during the call too, and is remembered. Type a name if you like (otherwise it becomes "Meeting 14:30"), pick the audio format and the transcript language, and press **Start recording**.
 
-<p align="center"><img src="screenshots/ready.webp" alt="The ready page: meeting name, audio file, language, two meters that say Not recording, the Start recording button and Import an audio file, or drop one here" width="440"></p>
+<p align="center"><img src="screenshots/ready.webp" alt="The ready page: meeting name, audio file, language, two meters that say Not recording, the microphone on System default and the computer audio on a USB headset, the Start recording button and Import an audio file, or drop one here" width="440"></p>
 
 ### Records both sides of the call
 
-Your microphone and whatever your computer plays are recorded as two separate tracks. The name, the audio format and the language can all still be changed during the call.
+Your microphone and whatever your computer plays are recorded as two separate tracks. The name, the audio format, the language and the devices can all still be changed during the call.
 
-<p align="center"><img src="screenshots/recording.webp" alt="Recording: both meters moving, the clock, Pause and Stop recording" width="440">&nbsp;&nbsp;<img src="screenshots/paused.webp" alt="Paused: both waves frozen and dimmed with a PAUSED sign, Resume and Stop recording" width="440"></p>
+<p align="center"><img src="screenshots/recording.webp" alt="Recording: both meters moving, the clock, Everything above can still be changed, Pause and Stop recording" width="440">&nbsp;&nbsp;<img src="screenshots/paused.webp" alt="Paused: both waves frozen and dimmed with a PAUSED sign, Resume and Stop recording" width="440"></p>
 
 **Pause** freezes both waves under a "❚❚ PAUSED" sign and stops the clock; nothing is written to either track until you press **Resume**.
 
@@ -146,7 +146,7 @@ Both tracks are always recorded separately, and each is levelled to the same spe
 
 ## How it works
 
-- **Recording.** The mic (`@DEFAULT_SOURCE@`) and the monitor of the default output (`@DEFAULT_MONITOR@`) are captured with `parec`. Because it follows the default output, switching to a headset during a call keeps working. `ffmpeg` encodes the audio to Opus when you stop.
+- **Recording.** The mic (`@DEFAULT_SOURCE@`) and the monitor of the default output (`@DEFAULT_MONITOR@`) are captured with `parec`, unless you picked a device above a meter. Following the default output, switching to a headset during a call keeps working, and a picked device that is unplugged is recorded again when it comes back. When the audio stops coming in for a moment, say while a Bluetooth headset switches to its headset mode or a picked device is unplugged, that track gets silence for the time, so the two tracks stay in step. `ffmpeg` encodes the audio to Opus when you stop.
 - **Transcription.** After the call both tracks are mixed and transcribed in one pass with whisper-rs, using the `large-v3-turbo` model unless you pick another, so there is a single timeline. Long silences are skipped, which keeps whisper from inventing text in them, and word times come from whisper's attention alignment (DTW).
 - **Who said what.** The mic and the computer audio are transcribed one at a time, so the side of each line is simply its track, and two people talking at once, or someone talking over music, are both kept. Through speakers the other side leaks into your mic; the app leaves out what is only that echo, also when it is loud enough to be heard as a voice of its own: a voice on the mic that only speaks while the computer audio does is echo. When several voices share one side, a colleague next to you or three people on the other end, they are told apart as well (see below): "You 1", "You 2" and "Remote 1", "Remote 2" and so on, each with its own name field.
 - **Imported files.** A single audio file has no second track to tell the speakers apart, so the voices themselves are told apart with NVIDIA's [Nemotron 3 Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization), run locally through ONNX Runtime. It follows up to eight speakers, also when they talk at the same time, and numbers them "Speaker 1", "Speaker 2" and so on in the order they first speak. The number of speakers is found automatically (voices heard for only a few seconds are folded into the nearest real speaker) or can be fixed. A sentence always goes to one speaker as a whole. Similar voices and fast back-and-forth can still land on the wrong speaker, which the swap-speaker button fixes per line.
