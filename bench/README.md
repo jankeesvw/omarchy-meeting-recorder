@@ -24,6 +24,8 @@ Only Python's standard library is needed, plus ffmpeg for the AMI download. The 
 | `music` | The other side talks with music playing in the background |
 | `import` | The `call` as one mixed file, as if dropped on the app |
 | `silence` | Twenty seconds of room noise: the transcript must be empty |
+| `noisy-mic` | `call` with the mic's noise floor at about −32 dBFS under speech peaking near −17 dBFS, like a cheap or onboard mic (#27) |
+| `silent-mic` | `call` with nobody speaking on your side: the mic only hears room noise at about −38 dBFS, and no line may be yours (`invented` stays 0) |
 | `ami-ES2004a-import` | A real four-person meeting as one mixed file (with `--ami`, the first 5 minutes by default) |
 | `ami-ES2004a-call` | The same meeting as a call: one person's headset is your mic, the other three are the computer audio |
 

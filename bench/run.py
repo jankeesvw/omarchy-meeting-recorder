@@ -15,7 +15,8 @@
 Columns: found = words of the script that are in the transcript; side = of
 those, on the right side of the call (you or the other side); person = with
 the right person; leaked = lines of yours that are really the other side
-leaking into your mic; speakers = voices told apart / voices in the case;
+leaking into your mic; invented = lines of yours with hardly a word anyone
+said then (made up from noise); speakers = voices told apart / voices in the case;
 speaker error = share of speech given to the wrong speaker by `diarize`.
 For AMI there is no script, so side and person come from who spoke when.
 Only Python's standard library is needed, plus ffmpeg for AMI.
@@ -113,7 +114,17 @@ def score_text(markdown, truth):
         own = Counter(l["words"])
         if sum((own & theirs).values()) > max(0.6 * sum(own.values()), sum((own & mine).values())):
             leaked += 1
-    return {"found": found / total, "side": side / total, "person": right / total, "leaked": leaked,
+    # A line of yours with hardly a word anyone said around then: made up,
+    # most often from noise on a mic with no speech.
+    invented = 0
+    for l in lines:
+        if side_of(l["label"]) != "mic" or not l["words"]:
+            continue
+        said = Counter(w for t in truth if overlaps(l, t) for w in words(t["text"]))
+        own = Counter(l["words"])
+        if sum((own & said).values()) < 0.2 * sum(own.values()):
+            invented += 1
+    return {"found": found / total, "side": side / total, "person": right / total, "leaked": leaked, "invented": invented,
             "speakers": f"{len(votes)}/{len(names)}"}
 
 
@@ -303,7 +314,7 @@ def main():
             scored["error"] = str(e)
         results[name] = scored
 
-    columns = ["found", "side", "person", "leaked", "lines", "speakers", "speaker error", "seconds"]
+    columns = ["found", "side", "person", "leaked", "invented", "lines", "speakers", "speaker error", "seconds"]
     shown = [c for c in columns if any(c in r for r in results.values())]
     width = max(len(n) for n in results) + 2
     print("case".ljust(width) + "".join(c.rjust(15) for c in shown))

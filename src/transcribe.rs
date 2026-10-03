@@ -312,7 +312,9 @@ struct Region {
 
 const FRAME: usize = WHISPER_RATE * 30 / 1000;
 
-/// Frames of `track` with sound in them: above four times its own noise floor.
+/// Frames of `track` with sound in them: above four times its own noise
+/// floor. The other side, imports and the echo check keep this fixed bar;
+/// only your mic gets `adaptive_frames` (#27).
 fn active_frames(track: &[f32], frames: usize) -> Vec<bool> {
     let energies: Vec<f32> = track.chunks(FRAME).map(rms).collect();
     let mut active = vec![false; frames];
@@ -323,6 +325,32 @@ fn active_frames(track: &[f32], frames: usize) -> Vec<bool> {
     sorted.sort_by(f32::total_cmp);
     let floor = sorted[sorted.len() / 10];
     let threshold = (floor * 4.0).max(0.002);
+    for (i, energy) in energies.iter().enumerate().take(frames) {
+        if *energy >= threshold {
+            active[i] = true;
+        }
+    }
+    active
+}
+
+/// Frames of `track` with sound in them: above its own noise floor by a
+/// third of the way up to its speech level, between 3 dB and 12 dB (four
+/// times). A clean track keeps the 12 dB; on a noisy mic, where speech stands
+/// only 10 to 15 dB over the floor, a fixed 12 dB dropped most of the speech
+/// (#27; the bench's `noisy-mic`).
+fn adaptive_frames(track: &[f32], frames: usize) -> Vec<bool> {
+    let energies: Vec<f32> = track.chunks(FRAME).map(rms).collect();
+    let mut active = vec![false; frames];
+    if energies.is_empty() {
+        return active;
+    }
+    let mut sorted = energies.clone();
+    sorted.sort_by(f32::total_cmp);
+    let floor = sorted[sorted.len() / 10];
+    let speech = sorted[(sorted.len() * 95 / 100).min(sorted.len() - 1)];
+    let gap_db = 20.0 * (speech.max(1e-9) / floor.max(1e-9)).log10();
+    let margin_db = (gap_db / 3.0).clamp(3.0, 12.0);
+    let threshold = (floor * 10f32.powf(margin_db / 20.0)).max(0.002);
     for (i, energy) in energies.iter().enumerate().take(frames) {
         if *energy >= threshold {
             active[i] = true;
@@ -362,7 +390,7 @@ fn own_speech_regions(mic: &[f32], computer: &[f32]) -> Vec<Region> {
             .collect()
     };
     let (own, other) = (level(mic), level(computer));
-    let mut active = active_frames(mic, frames);
+    let mut active = adaptive_frames(mic, frames);
     for (i, a) in active.iter_mut().enumerate() {
         let loudest = other[i.saturating_sub(AROUND)..(i + AROUND + 1).min(frames)]
             .iter()
@@ -562,7 +590,7 @@ pub fn transcribe(
     // several people on the other end of the call. On the mic only your own
     // stretches count, so the other side leaking in is not taken for a person
     // in the room.
-    let local = voices(&only(&mic, &mic_regions), events, abort)?;
+    let (local, heard) = voices_heard(&only(&mic, &mic_regions), events, abort)?;
     // Echo that got past the level check can still come out as a voice of
     // its own; its lines are dropped after the mic's pass.
     let (local, echo) = split_echo(
@@ -611,9 +639,15 @@ pub fn transcribe(
             language = found.clone();
             detected = Some(found);
         }
-        segments.extend(lines.into_iter().filter(|l| {
-            echo.is_empty() || crate::diarize::speaker_at(echo, l.start_ms, l.end_ms) == 0
-        }));
+        let mine = matches!(speakers, Speakers::Side("You", _));
+        segments.extend(
+            lines
+                .into_iter()
+                .filter(|l| {
+                    echo.is_empty() || crate::diarize::speaker_at(echo, l.start_ms, l.end_ms) == 0
+                })
+                .filter(|l| !mine || voice_heard(heard.as_deref(), l.start_ms, l.end_ms)),
+        );
         done += share;
     }
     emit(events, Event::Progress(1.0));
@@ -772,18 +806,43 @@ fn voices(
     events: &Events,
     abort: &Abort,
 ) -> Result<Vec<crate::diarize::Turn>, String> {
+    Ok(voices_heard(track, events, abort)?.0)
+}
+
+/// `voices`, and where any voice was heard at all: every turn, one speaker
+/// or several (None when that couldn't be told: the model failed).
+#[allow(clippy::type_complexity)]
+fn voices_heard(
+    track: &[f32],
+    events: &Events,
+    abort: &Abort,
+) -> Result<(Vec<crate::diarize::Turn>, Option<Vec<crate::diarize::Turn>>), String> {
     if is_silent(track) {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Some(Vec::new())));
     }
     match crate::diarize::turns(track, None, events, abort) {
-        Ok(turns) if turns.iter().any(|t| t.speaker > 0) => Ok(turns),
-        Ok(_) => Ok(Vec::new()),
+        Ok(turns) if turns.iter().any(|t| t.speaker > 0) => Ok((turns.clone(), Some(turns))),
+        Ok(turns) => Ok((Vec::new(), Some(turns))),
         Err(e) if e == CANCELLED => Err(e),
         Err(e) => {
             eprintln!("{}: telling voices apart: {e}", crate::APP_NAME);
-            Ok(Vec::new())
+            Ok((Vec::new(), None))
         }
     }
+}
+
+/// Whether a line of yours falls where the speaker model heard a voice on
+/// your mic. On a mic with no speech the silence gate lets some noise
+/// through, and whisper makes lines up from it; there the speaker model
+/// hears no voice. Kept when the model couldn't tell (None), with a second
+/// of slack at either end.
+fn voice_heard(heard: Option<&[crate::diarize::Turn]>, start_ms: i64, end_ms: i64) -> bool {
+    const SLACK: i64 = 1000;
+    heard.is_none_or(|turns| {
+        turns
+            .iter()
+            .any(|t| t.start_ms < end_ms + SLACK && t.end_ms > start_ms - SLACK)
+    })
 }
 
 /// Transcribes one imported audio file (16 kHz mono) and tells the voices in
@@ -1454,6 +1513,36 @@ mod tests {
         }
     }
 
+    /// A track of 30 ms frames at the given RMS levels.
+    fn frames_at(levels: &[f32]) -> Vec<f32> {
+        levels
+            .iter()
+            .flat_map(|level| (0..FRAME).map(move |i| if i % 2 == 0 { *level } else { -*level }))
+            .collect()
+    }
+
+    #[test]
+    fn speech_close_to_a_noisy_floor_still_counts() {
+        // A noisy mic: floor at 0.025 (-32 dBFS), speech at 0.06 (-24 dBFS),
+        // 7.6 dB over it, under the fixed 12 dB.
+        let mut levels = vec![0.025; 80];
+        levels.extend(vec![0.06; 20]);
+        let active = adaptive_frames(&frames_at(&levels), levels.len());
+        assert!(active[..80].iter().all(|a| !a), "the noise stays out");
+        assert!(active[80..].iter().all(|a| *a), "the speech is kept");
+    }
+
+    #[test]
+    fn a_clean_track_keeps_the_full_margin() {
+        // Floor at 0.001, speech at 0.1 (40 dB over): 12 dB, as before.
+        let mut levels = vec![0.001; 80];
+        levels.extend(vec![0.0035; 5]); // 10.9 dB over the floor: not sound
+        levels.extend(vec![0.1; 15]);
+        let active = adaptive_frames(&frames_at(&levels), levels.len());
+        assert!(active[..85].iter().all(|a| !a));
+        assert!(active[85..].iter().all(|a| *a));
+    }
+
     #[test]
     fn both_sides_come_back_in_the_order_they_spoke() {
         let out = interleave(vec![
@@ -1545,5 +1634,19 @@ mod tests {
             .map(|s| s.text.as_str())
             .collect();
         assert_eq!(yours, ["The review is still pending, I see."]);
+    }
+
+    #[test]
+    fn lines_of_yours_need_a_voice_heard_on_the_mic() {
+        let heard = vec![crate::diarize::Turn {
+            start_ms: 10_000,
+            end_ms: 14_000,
+            speaker: 0,
+        }];
+        assert!(voice_heard(Some(&heard), 11_000, 12_000));
+        assert!(voice_heard(Some(&heard), 14_500, 16_000));
+        assert!(!voice_heard(Some(&heard), 30_000, 32_000));
+        assert!(!voice_heard(Some(&[]), 0, 1_000));
+        assert!(voice_heard(None, 0, 1_000));
     }
 }
