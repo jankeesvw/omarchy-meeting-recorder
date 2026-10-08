@@ -18,6 +18,7 @@ mod player;
 mod settings;
 mod theme;
 mod transcribe;
+mod transcriber;
 mod ui;
 
 use gtk::glib;
