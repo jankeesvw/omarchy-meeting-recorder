@@ -22,6 +22,21 @@ command = "~/bin/publish-transcript"
 
 The menu reads this file every time it opens, so a new action shows up without restarting the app.
 
+## Running an action on its own
+
+An action with `auto = true` runs by itself, besides being in the menu:
+
+```toml
+[[action]]
+name = "Store transcript in Obsidian"
+command = "~/bin/store-in-obsidian"
+auto = true
+```
+
+It runs every time a transcript is done: after a recording, an import, and **Transcribe again**. When your default agent writes chapters, it waits for those first, so the action sees the whole meeting. Several automatic actions run one after the other, in the order of the file, and each shows up as it does from the menu: a toast while it runs, then its last line, or the reason it failed. If you rename or open another meeting in that window meanwhile, the actions that have not started yet are skipped.
+
+`omarchy-meeting-recorder action` marks the automatic ones in its list.
+
 ## What your command gets
 
 The command runs through `sh -c` in the meeting folder, so `~`, pipes and `VAR=value` in front all work. The folder is `$1`, and the meeting is described in these variables:
@@ -199,7 +214,7 @@ echo "Published as a secret gist $url"
 
 Point your coding agent at this page and ask it for an action, for instance: *"Write a Meeting Recorder action that mails the summary and the action items to everyone in the meeting."* Everything it needs:
 
-- An action is an entry in `~/.config/omarchy-meeting-recorder/config.toml`: a `[[action]]` table with `name` (the menu label) and `command` (run with `sh -c`). Add to the file, never replace what is there.
+- An action is an entry in `~/.config/omarchy-meeting-recorder/config.toml`: a `[[action]]` table with `name` (the menu label) and `command` (run with `sh -c`). Add to the file, never replace what is there. Add `auto = true` only when the user wants it to run by itself every time a transcript is done.
 - The command runs in the meeting folder, gets it as `$1`, and gets the `MEETING_*` variables in the table above. Read the transcript from `$MEETING_TRANSCRIPT`; the speakers and chapters are in the JSON at `$MEETING_MANIFEST`. stdin is empty. For the audio of the whole meeting, use `audio.ogg` when the folder has one, else mix `mic.ogg` and `computer.ogg` (`ffmpeg -i mic.ogg -i computer.ogg -filter_complex amix=inputs=2:normalize=0 ...`); `$MEETING_AUDIO` alone is only your side with Separate files. Leave the raw tracks in `.tracks` alone, they are not levelled.
 - Print one short line when done: it is shown to the user. Put a link in that line and it goes behind an Open button, out of the text: `Saved obsidian://...`, `Published https://...`. Exit non-zero on failure and write the reason to stderr; its last line is shown.
 - An action may edit `$MEETING_TRANSCRIPT` and `$MEETING_MANIFEST`; the app shows the result right away. Keep the speaker names in both the same, and keep the `**[mm:ss] Name:** text` line format.

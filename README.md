@@ -98,7 +98,7 @@ Chapters are an extra, not a requirement: without an agent the button is simply 
 
 ### Runs your own actions
 
-Put a few scripts of your own under **Actions** on the done page: store the transcript in your notes, publish it, mail it around. They go in `~/.config/omarchy-meeting-recorder/config.toml`, each with a name for the menu and a command. Until there is one, the button is **Add actions…** and explains how. See [Actions](#actions).
+Put a few scripts of your own under **Actions** on the done page: store the transcript in your notes, publish it, mail it around. They go in `~/.config/omarchy-meeting-recorder/config.toml`, each with a name for the menu and a command. An action can also run on its own, as soon as the transcript is done. Until there is one, the button is **Add actions…** and explains how. See [Actions](#actions).
 
 ### Wears your Omarchy theme
 
@@ -171,7 +171,7 @@ The app looks for `ggml-<model>.bin`, for instance `ggml-large-v3-turbo.bin`, in
 
 ## Actions
 
-Your own scripts, picked from the **Actions** menu on the done page: store the transcript in Obsidian, publish it, mail it around. Each is a name and a command in `~/.config/omarchy-meeting-recorder/config.toml`; the command gets the meeting folder and the meeting's details, and what it prints last shows up in the app, with an **Open** button for a link.
+Your own scripts, picked from the **Actions** menu on the done page: store the transcript in Obsidian, publish it, mail it around. Each is a name and a command in `~/.config/omarchy-meeting-recorder/config.toml`; the command gets the meeting folder and the meeting's details, and what it prints last shows up in the app, with an **Open** button for a link. Give one `auto = true` and it runs by itself every time a transcript is done, after the chapters when there are any: a meeting is filed in your notes, or handed to a pipeline of your own, without a click.
 
 <p align="center"><img src="screenshots/actions-menu.webp" alt="Clicking Actions on the done page: the view zooms in on the menu with Store transcript in Obsidian and Publish as public transcript" width="700"></p>
 

@@ -343,6 +343,9 @@ struct Recorder {
     /// Looked up once: the default agent, if any.
     agent: std::cell::OnceCell<Option<Agent>>,
     generating: Cell<bool>,
+    /// The meeting whose automatic actions are still to run: set when its
+    /// transcript is done, taken once the chapters are too.
+    auto_actions_due: RefCell<Option<PathBuf>>,
     current_line: Cell<i32>,
 
     mic: Source,
@@ -800,6 +803,7 @@ impl Recorder {
             chapters_spinner,
             agent: std::cell::OnceCell::new(),
             generating: Cell::new(false),
+            auto_actions_due: RefCell::default(),
             current_line: Cell::new(-1),
             mic,
             system,
@@ -1212,12 +1216,59 @@ impl Recorder {
         self.add_actions_button.set_visible(actions.is_empty());
     }
 
-    /// Runs one of your actions on this meeting, off the main thread, and says
-    /// how it went; a link it printed gets an Open button.
+    /// Runs one of your actions on this meeting from the menu.
     fn run_action(self: &Rc<Self>, index: usize) {
         let Some(action) = crate::actions::load().into_iter().nth(index) else {
             return;
         };
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            this.perform(action).await;
+        });
+    }
+
+    /// Runs the actions marked `auto = true` on the meeting they are due for,
+    /// one after the other in the order of the config file. They are due once
+    /// its transcript is done, and its chapters when an agent writes them. A
+    /// window that has moved on to another meeting meanwhile leaves them.
+    fn run_automatic_actions(self: &Rc<Self>) {
+        let Some(due) = self.auto_actions_due.borrow_mut().take() else {
+            return;
+        };
+        let actions = crate::actions::automatic();
+        if actions.is_empty() || !self.showing(&due) {
+            return;
+        }
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            for action in actions {
+                if !this.showing(&due) {
+                    break;
+                }
+                this.perform(action).await;
+            }
+        });
+    }
+
+    /// Whether the done page shows `dir`: the same meeting, also after a
+    /// rename, which keeps the timestamp the folder name starts with.
+    fn showing(&self, dir: &std::path::Path) -> bool {
+        let prefix = |p: &std::path::Path| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.chars().take(12).collect::<String>())
+        };
+        self.state.get() == State::Done
+            && self
+                .result_dir
+                .borrow()
+                .as_deref()
+                .is_some_and(|current| prefix(current) == prefix(dir))
+    }
+
+    /// Runs `action` on this meeting off the main thread and says how it went;
+    /// a link it printed gets an Open button. Returns once the action is done.
+    async fn perform(self: &Rc<Self>, action: crate::actions::Action) {
         let (Some(dir), Some(manifest)) = (
             self.result_dir.borrow().clone(),
             self.manifest.borrow().clone(),
@@ -1236,40 +1287,37 @@ impl Recorder {
         std::thread::spawn(move || {
             let _ = tx.send_blocking(crate::actions::run(&action, &folder, &manifest));
         });
-        let this = self.clone();
-        glib::spawn_future_local(async move {
-            let result = rx.recv().await;
-            running.dismiss();
-            // The action may have edited the meeting: show what is on disk now.
-            if crate::actions::fingerprint(&dir) != before {
-                this.reload_meeting(&dir);
+        let result = rx.recv().await;
+        running.dismiss();
+        // The action may have edited the meeting: show what is on disk now.
+        if crate::actions::fingerprint(&dir) != before {
+            self.reload_meeting(&dir);
+        }
+        let Ok(result) = result else { return };
+        let toast = match result {
+            Ok(outcome) => {
+                let toast = adw::Toast::new(&outcome.message);
+                toast.set_use_markup(false);
+                if let Some(url) = outcome.url {
+                    toast.set_button_label(Some("Open"));
+                    toast.set_timeout(15);
+                    toast.connect_button_clicked(move |_| {
+                        let _ = gio::AppInfo::launch_default_for_uri(
+                            &url,
+                            None::<&gio::AppLaunchContext>,
+                        );
+                    });
+                }
+                toast
             }
-            let Ok(result) = result else { return };
-            let toast = match result {
-                Ok(outcome) => {
-                    let toast = adw::Toast::new(&outcome.message);
-                    toast.set_use_markup(false);
-                    if let Some(url) = outcome.url {
-                        toast.set_button_label(Some("Open"));
-                        toast.set_timeout(15);
-                        toast.connect_button_clicked(move |_| {
-                            let _ = gio::AppInfo::launch_default_for_uri(
-                                &url,
-                                None::<&gio::AppLaunchContext>,
-                            );
-                        });
-                    }
-                    toast
-                }
-                Err(why) => {
-                    let toast = adw::Toast::new(&format!("{name} failed: {why}"));
-                    toast.set_use_markup(false);
-                    toast.set_timeout(10);
-                    toast
-                }
-            };
-            this.toasts.add_toast(toast);
-        });
+            Err(why) => {
+                let toast = adw::Toast::new(&format!("{name} failed: {why}"));
+                toast.set_use_markup(false);
+                toast.set_timeout(10);
+                toast
+            }
+        };
+        self.toasts.add_toast(toast);
     }
 
     /// Reads the meeting on the done page again after something else changed
@@ -2175,9 +2223,14 @@ impl Recorder {
         } else {
             self.window.set_default_widget(Some(&self.copy_button));
             self.copy_button.grab_focus();
+            // Your automatic actions run on a fresh transcript, after the
+            // chapters when there are any, so they see the whole meeting.
+            *self.auto_actions_due.borrow_mut() = self.result_dir.borrow().clone();
             // A fresh transcript gets chapters when an agent is around.
             if self.can_have_chapters() {
                 self.generate_chapters();
+            } else {
+                self.run_automatic_actions();
             }
         }
         if self.quit_when_done.get()
@@ -2443,10 +2496,12 @@ impl Recorder {
     /// works the same without them; a failure only shows up in the header.
     fn generate_chapters(self: &Rc<Self>) {
         if self.generating.get() {
+            self.run_automatic_actions();
             return;
         }
         let (Some(agent), Some(dir)) = (self.default_agent(), self.result_dir.borrow().clone())
         else {
+            self.run_automatic_actions();
             return;
         };
         let lines = self.lines.borrow().clone();
@@ -2478,6 +2533,7 @@ impl Recorder {
             };
             let current = this.result_dir.borrow().clone();
             let Some(dir) = current.filter(|d| prefix(d) == prefix(&dir)) else {
+                this.run_automatic_actions();
                 return;
             };
             match result {
@@ -2489,6 +2545,9 @@ impl Recorder {
                         .set_description(Some(&format!("{} could not make chapters", agent.name)));
                 }
             }
+            // With or without chapters, the meeting is now as complete as it
+            // gets: the automatic actions can have it.
+            this.run_automatic_actions();
         });
     }
 
