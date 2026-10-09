@@ -83,23 +83,30 @@ fn emit(events: &Events, event: Event) {
 pub fn load_track(path: &Path) -> Result<Vec<f32>, String> {
     if path.extension().is_some_and(|e| e == "raw") {
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let frame = 2 * CHANNELS as usize;
-        let mono: Vec<f32> = bytes
-            .chunks_exact(frame)
-            .map(|f| {
-                let sum: f32 = f
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|s| f32::from(i16::from_le_bytes(*s)))
-                    .sum();
-                sum / CHANNELS as f32 / 32768.0
-            })
-            .collect();
-        Ok(downsample(&mono, RATE as usize / WHISPER_RATE))
+        Ok(raw_to_whisper_rate(&bytes))
     } else {
         decode_with_ffmpeg(path)
     }
+}
+
+/// Downmixes a buffer in the app's own staging format (s16le, RATE, CHANNELS)
+/// to 16 kHz mono, the rate whisper wants. Shared with live captions, which
+/// take the same window straight from a `Source` instead of from disk.
+pub(crate) fn raw_to_whisper_rate(bytes: &[u8]) -> Vec<f32> {
+    let frame = 2 * CHANNELS as usize;
+    let mono: Vec<f32> = bytes
+        .chunks_exact(frame)
+        .map(|f| {
+            let sum: f32 = f
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|s| f32::from(i16::from_le_bytes(*s)))
+                .sum();
+            sum / CHANNELS as f32 / 32768.0
+        })
+        .collect();
+    downsample(&mono, RATE as usize / WHISPER_RATE)
 }
 
 fn decode_with_ffmpeg(path: &Path) -> Result<Vec<f32>, String> {
@@ -203,7 +210,7 @@ fn sample_to_ms(sample: usize) -> i64 {
 }
 
 /// Below about -50 dBFS there is no speech to find, only hallucinations.
-fn is_silent(samples: &[f32]) -> bool {
+pub(crate) fn is_silent(samples: &[f32]) -> bool {
     samples.iter().fold(0.0f32, |m, s| m.max(s.abs())) < 0.003
 }
 
@@ -231,7 +238,7 @@ fn soft_clip(x: f32) -> f32 {
 /// Mixes the two tracks for whisper. Each is brought to a similar speaking
 /// level first, so a quiet mic is not drowned by loud computer audio; a track
 /// that is only noise is left as it is rather than boosted.
-fn mix(mic: &[f32], computer: &[f32]) -> Vec<f32> {
+pub(crate) fn mix(mic: &[f32], computer: &[f32]) -> Vec<f32> {
     const TARGET: f32 = 0.1;
     let gain = |track: &[f32]| {
         let level = active_level(track);

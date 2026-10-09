@@ -1,5 +1,6 @@
 //! Remembered preferences: the audio format, the transcription language,
-//! the name you go by in transcripts and whether the bar widget was offered.
+//! the name you go by in transcripts, whether live captions are on and
+//! whether the bar widget was offered.
 
 use std::path::PathBuf;
 
@@ -74,6 +75,15 @@ pub fn load_your_name() -> String {
 
 pub fn save_your_name(name: &str) {
     save("your_name", name);
+}
+
+/// Off by default: a live preview of the transcript while you record.
+pub fn captions_enabled() -> bool {
+    load()["live_captions"].as_str() == Some("yes")
+}
+
+pub fn set_captions_enabled(enabled: bool) {
+    save("live_captions", if enabled { "yes" } else { "no" });
 }
 
 /// Whether the app already asked to put its widget in the bar.
