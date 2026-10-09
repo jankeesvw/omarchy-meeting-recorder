@@ -46,10 +46,11 @@ pub const MAX_REQUEST_BYTES: usize = 512 * 1024;
 const MAX_STREAM_BYTES: u64 = 1024 * 1024;
 /// The answer handed back.
 pub const MAX_ANSWER_BYTES: usize = 128 * 1024;
-/// `ulimit -f` for the agent, in KiB. The kernel refuses writes past it, which
+/// `ulimit -f` for file-captured agents, in shell-dependent units (Bash uses
+/// 512-byte blocks). The kernel refuses writes past it, which
 /// bounds what a runaway agent can put on disk before anything reads it back.
 /// It has to fit the agent's own session file, which holds the whole prompt.
-const FILE_LIMIT_KB: u64 = 2048;
+const FILE_LIMIT_BLOCKS: u64 = 2048;
 /// Linux refuses a single argv string over 128 KiB (MAX_ARG_STRLEN); agents
 /// that only take the prompt as an argument cannot go past it.
 const MAX_ARG_BYTES: usize = 120 * 1024;
@@ -272,7 +273,7 @@ struct Built {
     env: Vec<(&'static str, OsString)>,
     /// The prompt goes in on stdin; otherwise it is already in `args`.
     stdin: bool,
-    file_limit_kb: u64,
+    file_limit_blocks: u64,
 }
 
 fn build(id: &str, prompt: &str, dir: &Path) -> Result<Built, String> {
@@ -282,7 +283,7 @@ fn build(id: &str, prompt: &str, dir: &Path) -> Result<Built, String> {
         args: Vec::new(),
         env: Vec::new(),
         stdin: true,
-        file_limit_kb: FILE_LIMIT_KB,
+        file_limit_blocks: FILE_LIMIT_BLOCKS,
     };
     // --strict-mcp-config without --mcp-config loads no MCP servers, so none of
     // their tools exist either; it also halves startup time.
@@ -385,7 +386,7 @@ fn build(id: &str, prompt: &str, dir: &Path) -> Result<Built, String> {
             built.env.push(("GOOSE_MODE", "chat".into()));
             built.env.push(("GOOSE_TELEMETRY_OFF", "1".into()));
             built.args = s(&["run", "--no-profile", "--no-session", "--quiet", "-i", "-"]);
-            built.file_limit_kb = 8192;
+            built.file_limit_blocks = 8192;
         }
         other => return Err(refusal(other)),
     }
@@ -431,6 +432,9 @@ pub fn run(agent: &Agent, prompt: &str, text: &str) -> Result<String, String> {
 
 fn run_in(agent: &Agent, prompt: &str, dir: &Path) -> Result<String, String> {
     let built = build(&agent.id, prompt, dir)?;
+    if agent.id == "codex" {
+        return run_codex(agent, prompt, dir, built, TIMEOUT, KILL_GRACE);
+    }
     let (out_path, err_path) = (dir.join("stdout.txt"), dir.join("stderr.txt"));
     let stdout = std::fs::File::create(&out_path).map_err(|e| e.to_string())?;
     let stderr = std::fs::File::create(&err_path).map_err(|e| e.to_string())?;
@@ -453,7 +457,7 @@ fn run_in(agent: &Agent, prompt: &str, dir: &Path) -> Result<String, String> {
         // process dies before it can kill it; the loop below is the backstop.
         .arg(r#"ulimit -f "$1" && secs=$2 && shift 2 && exec timeout -k 5 "$secs" "$@""#)
         .arg("sh")
-        .arg(built.file_limit_kb.to_string())
+        .arg(built.file_limit_blocks.to_string())
         .arg(TIMEOUT.as_secs().to_string())
         .arg(&built.program)
         .args(&built.args)
@@ -542,6 +546,248 @@ fn run_in(agent: &Agent, prompt: &str, dir: &Path) -> Result<String, String> {
         );
     }
     Ok(answer.to_owned())
+}
+
+/// Codex keeps SQLite databases in its own home, even with tools disabled.
+/// A process-wide file limit also limits writes to those existing databases,
+/// so bound only the three output streams here. Keep file capture for agents
+/// such as OpenCode that do not reliably flush their output to pipes.
+fn run_codex(
+    agent: &Agent,
+    prompt: &str,
+    dir: &Path,
+    built: Built,
+    timeout: Duration,
+    grace: Duration,
+) -> Result<String, String> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::process::ExitStatusExt;
+
+    let answer_path = dir.join("answer.txt");
+    let path =
+        std::ffi::CString::new(answer_path.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
+    // Codex's -o uses File::create/write_all. An existing FIFO keeps that
+    // final-answer channel separate from the progress printed on stdout.
+    if unsafe { libc::mkfifo(path.as_ptr(), 0o600) } != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    // Holding both ends avoids EOF before Codex opens -o, and avoids blocking
+    // on open if it exits without writing an answer. The descriptor is CLOEXEC.
+    let answer_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(answer_path)
+        .map_err(|e| e.to_string())?;
+    let mut answer = Capture::new(answer_file, MAX_ANSWER_BYTES)?;
+    let child = Command::new("setsid")
+        .args(["timeout", "-k"])
+        .arg(grace.as_secs_f64().to_string())
+        .arg(timeout.as_secs_f64().to_string())
+        .arg(&built.program)
+        .args(&built.args)
+        .envs(built.env.iter().map(|(k, v)| (k, v)))
+        .current_dir(dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Could not start {}: {e}", agent.name))?;
+    let mut group = AgentGroup {
+        child,
+        stopped: false,
+    };
+    let mut stdout = Capture::new(
+        group.child.stdout.take().unwrap(),
+        MAX_STREAM_BYTES as usize,
+    )?;
+    let mut stderr = Capture::new(
+        group.child.stderr.take().unwrap(),
+        MAX_STREAM_BYTES as usize,
+    )?;
+    let mut stdin = group.child.stdin.take();
+    set_nonblocking(stdin.as_ref().unwrap())?;
+    let mut sent = 0;
+
+    let started = Instant::now();
+    let completed = loop {
+        // Each drain is bounded in work as well as memory: continuously noisy
+        // streams must not prevent checking the deadline or the other streams.
+        stdout.drain()?;
+        stderr.drain()?;
+        answer.drain()?;
+        if group.exited()? {
+            break true;
+        }
+        if started.elapsed() > timeout + grace * 2 {
+            break false;
+        }
+        if let Some(input) = &mut stdin {
+            // A descendant can leave the owned group and retain unread stdin.
+            // No blocking writer or join may extend this supervisor's deadline.
+            let end = (sent + 64 * 1024).min(prompt.len());
+            match input.write(&prompt.as_bytes()[sent..end]) {
+                Ok(0) => stdin = None,
+                Ok(n) => {
+                    sent += n;
+                    if sent == prompt.len() {
+                        stdin = None;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => stdin = None,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    // Even a successful agent may leave descendants holding stdin or any of
+    // the three output channels. Close stdin and kill the owned group, and
+    // never wait for pipe EOF. Drop also performs cleanup on every error path.
+    drop(stdin);
+    let status = group.stop().map_err(|e| e.to_string())?;
+    stdout.drain()?;
+    stderr.drain()?;
+    answer.drain()?;
+    let stdout = String::from_utf8_lossy(&stdout.bytes);
+    let stderr = String::from_utf8_lossy(&stderr.bytes);
+    if !completed {
+        return Err(format!(
+            "{} did not answer within {} seconds",
+            agent.name,
+            timeout.as_secs()
+        ));
+    }
+    // timeout's KILL can kill timeout itself as the session's group leader,
+    // giving us a signal status rather than a shell's numeric 137.
+    if matches!(status.code(), Some(124 | 137))
+        || (status.signal() == Some(libc::SIGKILL) && started.elapsed() >= timeout)
+    {
+        return Err(format!(
+            "{} did not answer within {} seconds",
+            agent.name,
+            timeout.as_secs()
+        ));
+    }
+    if !status.success() {
+        return Err(first_line(&stderr)
+            .or_else(|| first_line(&stdout))
+            .unwrap_or_else(|| format!("{} exited with status {status}", agent.name)));
+    }
+    let answer = tidy(&String::from_utf8_lossy(&answer.bytes));
+    let answer = truncate(&answer, MAX_ANSWER_BYTES);
+    if answer.trim().is_empty() {
+        return Err(
+            first_line(&stderr).unwrap_or_else(|| format!("{} returned nothing", agent.name))
+        );
+    }
+    Ok(answer.to_owned())
+}
+
+/// Capture a prefix and discard the rest, matching the file runner's bounded
+/// reads without allowing the temporary output files to grow on disk.
+struct Capture<R> {
+    reader: R,
+    bytes: Vec<u8>,
+    max: usize,
+}
+
+impl<R: Read + std::os::fd::AsRawFd> Capture<R> {
+    fn new(reader: R, max: usize) -> Result<Self, String> {
+        set_nonblocking(&reader)?;
+        Ok(Self {
+            reader,
+            bytes: Vec::new(),
+            max,
+        })
+    }
+
+    fn drain(&mut self) -> Result<(), String> {
+        let mut buffer = [0; 8192];
+        for _ in 0..8 {
+            match self.reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let keep = n.min(self.max - self.bytes.len());
+                    self.bytes.extend_from_slice(&buffer[..keep]);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        Ok(())
+    }
+}
+
+fn set_nonblocking(stream: &impl std::os::fd::AsRawFd) -> Result<(), String> {
+    let fd = stream.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(())
+}
+
+struct AgentGroup {
+    child: std::process::Child,
+    stopped: bool,
+}
+
+impl AgentGroup {
+    fn exited(&mut self) -> Result<bool, String> {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // Observe without reaping: the leader's PID remains reserved until
+        // stop() has signalled its group, so a reused PGID cannot be targeted.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                self.child.id(),
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                return Ok(false);
+            }
+            if error.raw_os_error() == Some(libc::ECHILD) {
+                // If something else reaped it, numeric signalling is unsafe.
+                self.stopped = true;
+            }
+            return Err(error.to_string());
+        }
+        Ok(unsafe { info.si_pid() } != 0)
+    }
+
+    fn stop(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        if !self.stopped {
+            let pid = self.child.id() as libc::pid_t;
+            // Never call try_wait/kill (which can internally reap) before
+            // signalling the group. The direct kill covers a failed setsid.
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+                libc::kill(pid, libc::SIGKILL);
+            }
+            // Disarm before the reaping wait, including its error paths.
+            self.stopped = true;
+        }
+        self.child.wait()
+    }
+}
+
+impl Drop for AgentGroup {
+    fn drop(&mut self) {
+        if !self.stopped {
+            let _ = self.stop();
+        }
+    }
 }
 
 /// The answer before tidying: codex writes it to a file, omp streams NDJSON
@@ -777,6 +1023,380 @@ pub fn cli(args: &[String]) -> gtk::glib::ExitCode {
 mod tests {
     use super::*;
 
+    struct FakeCodex {
+        dir: PathBuf,
+        built: Built,
+    }
+
+    impl FakeCodex {
+        fn new(mode: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            // Avoid global PATH/HOME changes: only this child's environment
+            // and executable are replaced. All state is synthetic and private.
+            let dir = std::env::temp_dir().join(format!(
+                "meeting-recorder-fake-codex-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+            let mut built = build("codex", "synthetic prompt", &dir).unwrap();
+            let program = dir.join("codex");
+            std::fs::write(
+                &program,
+                "#!/bin/sh\nulimit -c 0\nwhile [ $# -gt 0 ]; do\n if [ \"$1\" = -o ]; then shift; export FAKE_CODEX_ANSWER=$1; fi\n shift\ndone\nexec \"$FAKE_CODEX_TEST_EXE\" --exact agent::tests::fake_codex_child --ignored --nocapture\n",
+            ).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            built.program = program.into();
+            built.env.push((
+                "FAKE_CODEX_TEST_EXE",
+                std::env::current_exe().unwrap().into(),
+            ));
+            built.env.push(("FAKE_CODEX_MODE", mode.into()));
+            built
+                .env
+                .push(("FAKE_CODEX_STATE", dir.join("persistent.bin").into()));
+            Self { dir, built }
+        }
+
+        fn run(&mut self, prompt: &str, timeout: Duration) -> Result<String, String> {
+            let built = std::mem::replace(&mut self.built, build("codex", "", &self.dir).unwrap());
+            run_codex(
+                &Agent {
+                    id: "codex".into(),
+                    name: "Codex",
+                },
+                prompt,
+                &self.dir,
+                built,
+                timeout,
+                Duration::from_millis(50),
+            )
+        }
+
+        fn assert_descendant_stopped(&self) {
+            let pid = std::fs::read_to_string(self.dir.join("descendant.pid")).unwrap();
+            // SIGKILL is delivered asynchronously: the runner has returned once
+            // it is queued, and a busy machine may run the target a little
+            // later. The descendant never exits on its own before 10 seconds.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid.trim()));
+                if stat.is_err() || stat.unwrap().split_whitespace().nth(2) == Some("Z") {
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "descendant {} survived",
+                    pid.trim()
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    impl Drop for FakeCodex {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// A real child process of the runner, using the same fs::write as Codex
+    /// 0.159.0's last-message writer, without a model or the user's Codex home.
+    #[test]
+    #[ignore = "subprocess fixture; invoked only by the runner tests"]
+    fn fake_codex_child() {
+        use std::os::unix::fs::FileExt;
+        let Ok(mode) = std::env::var("FAKE_CODEX_MODE") else {
+            return;
+        };
+        // A baseline RLIMIT_FSIZE failure should return EFBIG, never request
+        // a core dump (piped system core handlers can ignore ulimit -c).
+        unsafe {
+            libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+        }
+        let answer = PathBuf::from(std::env::var_os("FAKE_CODEX_ANSWER").unwrap());
+        let state = PathBuf::from(std::env::var_os("FAKE_CODEX_STATE").unwrap());
+        if mode == "escaped-reader" {
+            assert!(unsafe { libc::setsid() } > 0);
+            // Keep every channel open, including unread stdin, outside the
+            // runner's owned session. Only this test fixture will clean it up.
+            let _output = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&answer)
+                .unwrap();
+            std::fs::write(
+                state.with_file_name("descendant.ready"),
+                std::fs::read_to_string("/proc/self/stat").unwrap(),
+            )
+            .unwrap();
+            std::thread::sleep(Duration::from_secs(5));
+            std::process::exit(0);
+        }
+        if mode == "descendant" {
+            // Retain stdin/stdout/stderr and the final-answer FIFO. Ignore
+            // TERM so the timeout's KILL and normal-exit cleanup are exercised.
+            unsafe {
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+            }
+            let mut output = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&answer)
+                .unwrap();
+            std::fs::write(state.with_file_name("descendant.ready"), "ready").unwrap();
+            // Keep going when the runner closes its ends (EPIPE), so only its
+            // KILL ends this process early; a runner that forgot it leaks
+            // nothing past the deadline.
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_secs(10) {
+                let failed = output.write_all(&[b'n'; 8192]).is_err()
+                    | std::io::stdout().write_all(&[b'o'; 8192]).is_err()
+                    | std::io::stderr().write_all(&[b'e'; 8192]).is_err();
+                if failed {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            std::process::exit(0);
+        }
+        if matches!(
+            mode.as_str(),
+            "descendants" | "early" | "timeout" | "escaped-exit" | "escaped-timeout"
+        ) {
+            if matches!(mode.as_str(), "descendants" | "escaped-exit") {
+                std::fs::write(&answer, "done").unwrap();
+            }
+            let child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "agent::tests::fake_codex_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env(
+                    "FAKE_CODEX_MODE",
+                    if mode.starts_with("escaped-") {
+                        "escaped-reader"
+                    } else {
+                        "descendant"
+                    },
+                )
+                .stdin(Stdio::inherit())
+                .spawn()
+                .unwrap();
+            std::fs::write(
+                state.with_file_name("descendant.pid"),
+                child.id().to_string(),
+            )
+            .unwrap();
+            while !state.with_file_name("descendant.ready").exists() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            if matches!(mode.as_str(), "timeout" | "escaped-timeout") {
+                unsafe {
+                    libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                }
+                std::thread::sleep(Duration::from_secs(60));
+            }
+            std::process::exit(0);
+        }
+        let mut prompt = String::new();
+        std::io::stdin().read_to_string(&mut prompt).unwrap();
+        assert_eq!(prompt, "synthetic prompt");
+        match mode.as_str() {
+            "persistent" => {
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&state)
+                    .unwrap();
+                // Real writes beyond the old 1 MiB ceiling, including the
+                // offset/size seen in the failing SQLite pwrite64 syscall.
+                if let Err(e) = file.write_all_at(&vec![b'p'; 2 * 1024 * 1024], 0) {
+                    eprintln!("persistent write failed: {e}");
+                    std::process::exit(17);
+                }
+                file.write_all_at(&[b'q'; 4096], 3_715_072).unwrap();
+                std::fs::write(&answer, "persistent write succeeded").unwrap();
+            }
+            "flood" => {
+                std::io::stdout()
+                    .write_all(&vec![b'o'; 3 * 1024 * 1024])
+                    .unwrap();
+                std::io::stderr()
+                    .write_all(&vec![b'e'; 3 * 1024 * 1024])
+                    .unwrap();
+                std::fs::write(&answer, "€".repeat(MAX_ANSWER_BYTES)).unwrap();
+            }
+            "failure" => {
+                eprintln!("synthetic failure");
+                std::process::exit(17);
+            }
+            "empty" => {}
+            _ => panic!("unknown fixture mode"),
+        }
+    }
+
+    #[test]
+    fn codex_persistent_writes_can_exceed_the_output_file_limit() {
+        let mut fake = FakeCodex::new("persistent");
+        std::fs::write(fake.dir.join("persistent.bin"), vec![0; 2 * 1024 * 1024]).unwrap();
+        assert_eq!(
+            fake.run("synthetic prompt", Duration::from_secs(10))
+                .unwrap(),
+            "persistent write succeeded"
+        );
+        assert_eq!(
+            std::fs::metadata(fake.dir.join("persistent.bin"))
+                .unwrap()
+                .len(),
+            3_719_168
+        );
+    }
+
+    #[test]
+    fn codex_capture_bounds_all_streams_and_preserves_utf8() {
+        use std::os::unix::fs::FileTypeExt;
+        let mut fake = FakeCodex::new("flood");
+        let answer = fake
+            .run("synthetic prompt", Duration::from_secs(10))
+            .unwrap();
+        assert_eq!(answer.len(), MAX_ANSWER_BYTES - MAX_ANSWER_BYTES % 3);
+        assert!(answer.chars().all(|c| c == '€'));
+        assert!(
+            std::fs::metadata(fake.dir.join("answer.txt"))
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
+        assert!(!fake.dir.join("stdout.txt").exists());
+        assert!(!fake.dir.join("stderr.txt").exists());
+        // The same capture used for stdout/stderr keeps only its prefix.
+        use std::os::fd::FromRawFd;
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        let receiver = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+        let mut sender = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+        let mut capture = Capture::new(receiver, 3).unwrap();
+        sender.write_all(b"abcdef").unwrap();
+        capture.drain().unwrap();
+        assert_eq!(capture.bytes, b"abc");
+    }
+
+    #[test]
+    fn codex_exit_without_an_answer_or_with_failure_does_not_wait_for_fifo() {
+        for (mode, message) in [
+            ("empty", "Codex returned nothing"),
+            ("failure", "synthetic failure"),
+        ] {
+            let mut fake = FakeCodex::new(mode);
+            let started = Instant::now();
+            assert_eq!(
+                fake.run("synthetic prompt", Duration::from_secs(10))
+                    .unwrap_err(),
+                message
+            );
+            assert!(started.elapsed() < Duration::from_secs(3));
+        }
+    }
+
+    #[test]
+    fn codex_exit_and_timeout_clean_up_descendants_retaining_stdio() {
+        for mode in ["descendants", "early", "timeout"] {
+            let mut fake = FakeCodex::new(mode);
+            let started = Instant::now();
+            // Exceeds a pipe's capacity, and neither the parent nor its
+            // descendant reads stdin. Sending the prompt must not block.
+            let result = fake.run(&"x".repeat(MAX_REQUEST_BYTES), Duration::from_millis(500));
+            if mode == "timeout" {
+                assert!(result.unwrap_err().contains("did not answer within"));
+            } else {
+                assert!(result.unwrap().starts_with(if mode == "descendants" {
+                    "done"
+                } else {
+                    "n"
+                }));
+            }
+            assert!(started.elapsed() < Duration::from_secs(3));
+            fake.assert_descendant_stopped();
+        }
+    }
+
+    #[test]
+    fn codex_escaped_stdin_reader_cannot_extend_exit_or_timeout() {
+        for mode in ["escaped-exit", "escaped-timeout"] {
+            let mut fake = FakeCodex::new(mode);
+            let started = Instant::now();
+            let result = fake.run(&"x".repeat(MAX_REQUEST_BYTES), Duration::from_millis(500));
+            let elapsed = started.elapsed();
+            let pid: libc::pid_t = std::fs::read_to_string(fake.dir.join("descendant.pid"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            // The runner must return without killing the escaped session.
+            // Clean up our synthetic sleeper before making assertions, even
+            // when running this regression against the earlier implementation.
+            // Use a stable handle for test-only escaped-session cleanup too.
+            // Verify its start time so the failing five-second baseline never
+            // targets a recycled PID after its synthetic sleeper has exited.
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
+            let current = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            let original = std::fs::read_to_string(fake.dir.join("descendant.ready")).unwrap();
+            let matches = current.split_whitespace().nth(21) == original.split_whitespace().nth(21);
+            let still_alive =
+                matches && current.split_whitespace().nth(2).is_some_and(|s| s != "Z");
+            if fd >= 0 {
+                let handle = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+                if matches {
+                    unsafe {
+                        libc::syscall(
+                            libc::SYS_pidfd_send_signal,
+                            handle.as_raw_fd(),
+                            libc::SIGKILL,
+                            std::ptr::null::<libc::siginfo_t>(),
+                            0,
+                        );
+                    }
+                }
+            }
+            assert!(elapsed < Duration::from_secs(2), "{mode} took {elapsed:?}");
+            assert!(still_alive);
+            if mode == "escaped-exit" {
+                assert_eq!(result.unwrap(), "done");
+            } else {
+                assert!(result.unwrap_err().contains("did not answer within"));
+            }
+        }
+    }
+
+    #[test]
+    fn codex_group_observation_keeps_leader_reserved_until_cleanup() {
+        let child = Command::new("setsid")
+            .args(["sh", "-c", "exit 17"])
+            .spawn()
+            .unwrap();
+        let mut group = AgentGroup {
+            child,
+            stopped: false,
+        };
+        let pid = group.child.id();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !group.exited().unwrap() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Observation is repeatable and the zombie still reserves its PID.
+        assert!(group.exited().unwrap());
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        assert_eq!(stat.split_whitespace().nth(2), Some("Z"));
+        assert_eq!(group.stop().unwrap().code(), Some(17));
+        assert!(group.stopped);
+        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+        // A repeated cleanup uses Child's cached status, never signals again.
+        assert_eq!(group.stop().unwrap().code(), Some(17));
+    }
+
     fn args(built: &Built) -> Vec<String> {
         built
             .args
@@ -862,7 +1482,7 @@ mod tests {
                 .iter()
                 .any(|(k, v)| *k == "GOOSE_MODE" && v == "chat")
         );
-        assert_eq!(built.file_limit_kb, 8192);
+        assert_eq!(built.file_limit_blocks, 8192);
     }
 
     #[test]
