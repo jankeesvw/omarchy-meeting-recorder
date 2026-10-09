@@ -121,6 +121,13 @@ omavm user 'export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
   cd /tmp && ffmpeg -v error -y -t 95 -i /tmp/stage/maya.wav /tmp/maya-90.wav && ffmpeg -v error -y -t 95 -i /tmp/stage/tom.wav /tmp/tom-90.wav'
 ```
 
+For the device menus above the meters, the ready, recording and paused shots record the computer audio from a third null sink called USB Headset, picked in the settings, while the microphone stays on System default (play Tom into `demo_headset` for those):
+
+```bash
+pactl load-module module-null-sink sink_name=demo_headset 'sink_properties=device.description="USB\ Headset"'
+# in settings.json: "system_device":"demo_headset.monitor","system_device_label":"USB Headset"
+```
+
 Maya plays into the microphone and Tom into the speakers at the same moment (`talk` in `lib.sh`):
 
 ```bash
