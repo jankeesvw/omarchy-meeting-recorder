@@ -1442,6 +1442,9 @@ impl Recorder {
                 "Recording. Name, audio file and language can still be changed.".to_owned()
             }
             State::Stopping => "Saving the audio…".to_owned(),
+            State::Transcribing if crate::transcriber::configured().is_some() => {
+                "Transcribing the meeting with your transcriber…".to_owned()
+            }
             State::Transcribing => "Transcribing the meeting on this computer…".to_owned(),
             State::Done => String::new(),
         };
@@ -1826,6 +1829,11 @@ impl Recorder {
         if self.model_downloading.get() {
             return;
         }
+        if crate::transcriber::configured().is_some() {
+            // A transcriber of your own needs no speech model here.
+            self.model_banner.set_revealed(false);
+            return;
+        }
         match crate::models::missing() {
             Some((name, size_mb)) => {
                 let size = if size_mb >= 1000 {
@@ -2040,12 +2048,55 @@ impl Recorder {
         *self.abort.borrow_mut() = Some(abort.clone());
         let (events_tx, events_rx) = async_channel::unbounded::<Event>();
         let (done_tx, done_rx) = async_channel::bounded(1);
+        // A transcriber of your own gets the saved files, never the raw
+        // staging; the levelled tracks are written before this runs.
+        let transcriber = crate::transcriber::configured();
+        let duration_secs = self
+            .manifest
+            .borrow()
+            .as_ref()
+            .map_or(0, |m| m.duration_secs);
+        let meeting_dir = out.clone();
         std::thread::spawn(move || {
-            let result = match tracks {
-                Tracks::Single(path, speakers) => transcribe::load_track(&path).and_then(|track| {
-                    transcribe::transcribe_single(&track, language, speakers, &events_tx, &abort)
-                }),
-                Tracks::Raw(dir) | Tracks::Kept(dir) => {
+            use crate::transcriber::{self, Input};
+            let result = match (transcriber, tracks) {
+                (Some(command), Tracks::Single(path, speakers)) => transcriber::transcribe(
+                    &command,
+                    Input::Single {
+                        audio: &path,
+                        speakers,
+                    },
+                    language,
+                    duration_secs,
+                    &events_tx,
+                    &abort,
+                ),
+                (Some(command), Tracks::Raw(_) | Tracks::Kept(_)) => {
+                    let (mic, computer) = export::tracks(&meeting_dir);
+                    if mic.is_file() && computer.is_file() {
+                        transcriber::transcribe(
+                            &command,
+                            Input::Tracks {
+                                mic: &mic,
+                                computer: &computer,
+                            },
+                            language,
+                            duration_secs,
+                            &events_tx,
+                            &abort,
+                        )
+                    } else {
+                        Err("the tracks were not saved, so there is nothing to give your transcriber".into())
+                    }
+                }
+                (None, Tracks::Single(path, speakers)) => {
+                    transcribe::load_track(&path).and_then(|track| {
+                        transcribe::transcribe_single(
+                            &track, language, speakers, &events_tx, &abort,
+                        )
+                    })
+                }
+                (None, Tracks::Raw(dir) | Tracks::Kept(dir)) => {
                     let (mic_path, computer_path) = if dir.join("mic.raw").exists() {
                         (dir.join("mic.raw"), dir.join("system.raw"))
                     } else {

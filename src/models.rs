@@ -100,19 +100,29 @@ pub fn configured() -> String {
     if let Some(name) = OVERRIDE.lock().unwrap().clone() {
         return name;
     }
+    config_value("model").unwrap_or_else(|| DEFAULT.to_owned())
+}
+
+/// A top-level `key = "value"` setting of the config file, without its quotes
+/// or a trailing comment; None when it is not there or empty. The `[[action]]`
+/// tables below the settings are the business of `actions`.
+pub fn config_value(key: &str) -> Option<String> {
     std::fs::read_to_string(config_file())
         .ok()
-        .and_then(|text| {
-            text.lines().find_map(|line| {
-                let (key, value) = line.split_once('=')?;
-                (key.trim() == "model").then(|| {
-                    let value = value.split('#').next().unwrap_or("");
-                    value.trim().trim_matches('"').to_owned()
-                })
+        .and_then(|text| config_value_in(&text, key))
+}
+
+pub fn config_value_in(text: &str, key: &str) -> Option<String> {
+    text.lines()
+        .take_while(|line| !line.trim_start().starts_with('['))
+        .find_map(|line| {
+            let (k, value) = line.split_once('=')?;
+            (k.trim() == key).then(|| {
+                let value = value.split('#').next().unwrap_or("");
+                value.trim().trim_matches('"').trim_matches('\'').to_owned()
             })
         })
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| DEFAULT.to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn known(name: &str) -> Option<&'static Model> {
