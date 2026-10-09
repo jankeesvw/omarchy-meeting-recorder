@@ -33,7 +33,7 @@ command = "~/bin/store-in-obsidian"
 auto = true
 ```
 
-It runs every time a transcript is done: after a recording, an import, and **Transcribe again**. When your default agent writes chapters, it waits for those first, so the action sees the whole meeting. Several automatic actions run one after the other, in the order of the file, and each shows up as it does from the menu: a toast while it runs, then its last line, or the reason it failed. If you rename or open another meeting in that window meanwhile, the actions that have not started yet are skipped.
+It runs every time a transcript is done: after a recording, an import, and **Transcribe again**. When your default agent writes chapters, it waits for those first, so the action sees the whole meeting. Several automatic actions run one after the other, in the order of the file, and each shows up as it does from the menu: a toast while it runs, then its last line, or the reason it failed. If you open another meeting in that window meanwhile, the actions that have not started yet are skipped; a rename does not count. Close the window while it transcribes and it stays around until they are done.
 
 `omarchy-meeting-recorder action` marks the automatic ones in its list.
 

@@ -1230,13 +1230,15 @@ impl Recorder {
     /// Runs the actions marked `auto = true` on the meeting they are due for,
     /// one after the other in the order of the config file. They are due once
     /// its transcript is done, and its chapters when an agent writes them. A
-    /// window that has moved on to another meeting meanwhile leaves them.
+    /// window that has moved on to another meeting meanwhile leaves them. A
+    /// window closed while it was busy closes once they are done.
     fn run_automatic_actions(self: &Rc<Self>) {
         let Some(due) = self.auto_actions_due.borrow_mut().take() else {
             return;
         };
         let actions = crate::actions::automatic();
         if actions.is_empty() || !self.showing(&due) {
+            self.close_if_asked();
             return;
         }
         let this = self.clone();
@@ -1247,6 +1249,7 @@ impl Recorder {
                 }
                 this.perform(action).await;
             }
+            this.close_if_asked();
         });
     }
 
@@ -2218,6 +2221,7 @@ impl Recorder {
         }
         self.show_transcript(text.as_deref(), problem.as_deref());
         self.transcript_scroll.vadjustment().set_value(0.0);
+        let actions_follow = problem.is_none() && !crate::actions::automatic().is_empty();
         if let Some(problem) = problem {
             eprintln!("{APP_NAME}: {problem}");
         } else {
@@ -2225,7 +2229,9 @@ impl Recorder {
             self.copy_button.grab_focus();
             // Your automatic actions run on a fresh transcript, after the
             // chapters when there are any, so they see the whole meeting.
-            *self.auto_actions_due.borrow_mut() = self.result_dir.borrow().clone();
+            if actions_follow {
+                *self.auto_actions_due.borrow_mut() = self.result_dir.borrow().clone();
+            }
             // A fresh transcript gets chapters when an agent is around.
             if self.can_have_chapters() {
                 self.generate_chapters();
@@ -2233,6 +2239,15 @@ impl Recorder {
                 self.run_automatic_actions();
             }
         }
+        // A window closed while busy goes now, or once its automatic actions
+        // are done: quitting first would kill them halfway or before they start.
+        if !actions_follow {
+            self.close_if_asked();
+        }
+    }
+
+    /// Closes a window that was closed while it was busy, now that it is done.
+    fn close_if_asked(self: &Rc<Self>) {
         if self.quit_when_done.get()
             && let Some(app) = self.window.application()
         {
