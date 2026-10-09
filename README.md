@@ -167,6 +167,26 @@ The command-line `transcribe` and `transcribe-file` take `--model` instead. When
 
 <p align="center"><img src="screenshots/model-banner.webp" alt="The banner: The speech model (tiny, 75 MB) is needed to transcribe, with Download" width="600"></p>
 
+### Initial prompt
+
+Whisper can be given an initial prompt to improve recognition of domain-specific terminology, names, accents and dialects. Set it in `~/.config/omarchy-meeting-recorder/config.toml`:
+
+```toml
+initial_prompt = "Technical maintenance interview. Terms: CMMS, MTBF, MTTR, predictive maintenance."
+```
+
+The command-line `transcribe` and `transcribe-file` commands also accept `--prompt`. A command-line prompt overrides the configured prompt:
+
+```bash
+omarchy-meeting-recorder transcribe-file interview.mp3 \
+  --language de \
+  --speakers 2 \
+  --prompt "German technical interview about maintenance management."
+```
+
+When no initial prompt is configured or supplied, transcription behaves exactly as before.
+
+
 The app looks for `ggml-<model>.bin`, for instance `ggml-large-v3-turbo.bin`, in `~/.local/share/omarchy-meeting-recorder/models/`. If you use [voxtype](https://voxtype.io) and it already downloaded that model to `~/.local/share/voxtype/models/`, that copy is used. Otherwise it is downloaded (about 1.6 GB for `large-v3-turbo`) from [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp). Finding speakers downloads the speaker model on first use (about 120 MB) to `nemotron-3-diarization/` in the same directory: the int8 ONNX export of Nemotron 3 Diarization from the [Hugging Face ONNX community](https://huggingface.co/onnx-community/Nemotron-3-Diarization-ONNX), pinned to one revision. The model is NVIDIA's, under the [OpenMDW license](https://huggingface.co/nvidia/Nemotron-3-Diarization). ONNX Runtime is compiled into the binary, so nothing else is needed at runtime.
 
 ## Actions
@@ -265,8 +285,8 @@ This also recovers a failed first-start “Add to Bar” attempt in version 1.0.
 | `omarchy-meeting-recorder compact` | Switch the recording window between full and compact |
 | `omarchy-meeting-recorder new-window` | Open another window, or the app when it is not running |
 | `omarchy-meeting-recorder watch` | Stream the recorder state as NDJSON, for the bar widget |
-| `omarchy-meeting-recorder transcribe <mic> <computer> [--language xx] [--model name]` | Transcribe two tracks and print the transcript as Markdown |
-| `omarchy-meeting-recorder transcribe-file <audio> [--speakers N] [--language xx] [--model name]` | Transcribe one file, telling the voices apart, and print the transcript as Markdown |
+| `omarchy-meeting-recorder transcribe <mic> <computer> [--language xx] [--model name] [--prompt text]` | Transcribe two tracks and print the transcript as Markdown |
+| `omarchy-meeting-recorder transcribe-file <audio> [--speakers N] [--language xx] [--model name] [--prompt text]` | Transcribe one file, telling the voices apart, and print the transcript as Markdown |
 | `omarchy-meeting-recorder ask "<prompt>" < text` | Run a prompt over stdin through the default agent, without tools (`ask --agent` shows which agent that is) |
 | `omarchy-meeting-recorder action "<name>" <meeting folder>` | Run one of your [actions](docs/actions.md) on a meeting, as the done page does; without arguments it lists them |
 

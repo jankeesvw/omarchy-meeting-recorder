@@ -12,6 +12,7 @@ use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -55,6 +56,35 @@ pub type Events = async_channel::Sender<Event>;
 pub type Abort = Arc<AtomicBool>;
 
 pub const CANCELLED: &str = "transcription cancelled";
+
+/// Set by `--prompt`; wins over the config file.
+static INITIAL_PROMPT_OVERRIDE: Mutex<Option<String>> = Mutex::new(None);
+
+fn set_initial_prompt_override(prompt: &str) {
+    *INITIAL_PROMPT_OVERRIDE.lock().unwrap() = Some(prompt.trim().to_owned());
+}
+
+fn initial_prompt_from_config(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            (key.trim() == "initial_prompt").then(|| {
+                let value = value.split('#').next().unwrap_or("");
+                value.trim().trim_matches('"').to_owned()
+            })
+        })
+        .filter(|prompt| !prompt.is_empty())
+}
+
+fn configured_initial_prompt() -> Option<String> {
+    if let Some(prompt) = INITIAL_PROMPT_OVERRIDE.lock().unwrap().clone() {
+        return (!prompt.is_empty()).then_some(prompt);
+    }
+
+    std::fs::read_to_string(crate::models::config_file())
+        .ok()
+        .and_then(|text| initial_prompt_from_config(&text))
+}
 
 #[derive(Debug, Clone)]
 pub struct Segment {
@@ -1015,6 +1045,9 @@ fn run_whisper(
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
     params.set_n_threads(threads.min(16) as i32);
     params.set_language(Some(language));
+    if let Some(prompt) = configured_initial_prompt() {
+        params.set_initial_prompt(&prompt);
+    }
     params.set_print_special(false);
     params.set_print_progress(false);
     params.set_print_realtime(false);
@@ -1412,6 +1445,10 @@ pub fn cli(args: &[String]) -> glib::ExitCode {
                 Some(name) => crate::models::set_override(name),
                 None => return usage(),
             },
+            "--prompt" => match iter.next() {
+                Some(prompt) => set_initial_prompt_override(prompt),
+                None => return usage(),
+            },
             _ => files.push(PathBuf::from(arg)),
         }
     }
@@ -1439,6 +1476,10 @@ pub fn cli_file(args: &[String]) -> glib::ExitCode {
             },
             "--model" | "-m" => match iter.next() {
                 Some(name) => crate::models::set_override(name),
+                None => return usage(),
+            },
+            "--prompt" => match iter.next() {
+                Some(prompt) => set_initial_prompt_override(prompt),
                 None => return usage(),
             },
             "--speakers" | "-s" => match iter.next().and_then(|n| n.parse::<usize>().ok()) {
@@ -1508,10 +1549,10 @@ fn run_cli(work: impl FnOnce(&Events, &Abort) -> Result<Transcript, String>) -> 
 
 fn usage() -> glib::ExitCode {
     eprintln!(
-        "Usage: {APP_NAME} transcribe <mic> <computer> [--language auto|en|nl|...] [--model name]"
+        "Usage: {APP_NAME} transcribe <mic> <computer> [--language auto|en|nl|...] [--model name] [--prompt text]"
     );
     eprintln!(
-        "       {APP_NAME} transcribe-file <audio> [--speakers N] [--language auto|en|nl|...] [--model name]"
+        "       {APP_NAME} transcribe-file <audio> [--speakers N] [--language auto|en|nl|...] [--model name] [--prompt text]"
     );
     glib::ExitCode::from(2)
 }
@@ -1535,6 +1576,32 @@ mod tests {
             .iter()
             .flat_map(|level| (0..FRAME).map(move |i| if i % 2 == 0 { *level } else { -*level }))
             .collect()
+    }
+
+    #[test]
+    fn initial_prompt_is_read_from_config() {
+        let config = r#"
+model = "large-v3"
+initial_prompt = "Maintenance interview with MTBF and MTTR"
+"#;
+        assert_eq!(
+            initial_prompt_from_config(config).as_deref(),
+            Some("Maintenance interview with MTBF and MTTR")
+        );
+    }
+
+    #[test]
+    fn empty_initial_prompt_is_ignored() {
+        assert_eq!(initial_prompt_from_config("initial_prompt = \"\""), None);
+    }
+
+    #[test]
+    fn unrelated_config_does_not_create_a_prompt() {
+        let config = r#"
+model = "large-v3"
+something_else = "value"
+"#;
+        assert_eq!(initial_prompt_from_config(config), None);
     }
 
     #[test]
