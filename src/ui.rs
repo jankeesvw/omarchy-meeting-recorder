@@ -318,7 +318,8 @@ struct Recorder {
     add_actions_button: gtk::Button,
     again_button: gtk::Button,
     done_title_row: adw::EntryRow,
-    done_group: adw::PreferencesGroup,
+    /// The speaker rows, in their own scrolling pane above the chapters.
+    speakers_group: adw::PreferencesGroup,
     /// One name row per speaker, rebuilt for every meeting.
     speaker_rows: RefCell<Vec<adw::EntryRow>>,
     again_language_row: adw::ComboRow,
@@ -569,7 +570,6 @@ impl Recorder {
         let chapters_group = adw::PreferencesGroup::builder()
             .title("Chapters")
             .header_suffix(&chapters_suffix)
-            .vexpand(true)
             .build();
         let chapters_list = gtk::ListBox::builder()
             .css_classes(["boxed-list"])
@@ -587,10 +587,68 @@ impl Recorder {
         let chapters_scroll = gtk::ScrolledWindow::builder()
             .child(&chapters_list)
             .vexpand(true)
+            .min_content_height(80)
             .hscrollbar_policy(gtk::PolicyType::Never)
             .build();
         chapters_group.add(&chapters_scroll);
-        left.append(&chapters_group);
+
+        // Speakers above the chapters, each scrolling on its own, with a
+        // handle between them to give one more room than the other. Until it
+        // is dragged they share the height equally.
+        let speakers_group = adw::PreferencesGroup::builder().title("Speakers").build();
+        let speakers_scroll = gtk::ScrolledWindow::builder()
+            .child(&speakers_group)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .min_content_height(60)
+            .build();
+        let split = gtk::Paned::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .start_child(&speakers_scroll)
+            .end_child(&chapters_group)
+            .resize_start_child(true)
+            .resize_end_child(true)
+            .shrink_start_child(false)
+            .shrink_end_child(false)
+            .vexpand(true)
+            .css_classes(["speakers-split"])
+            .build();
+        let saved = settings::load_speakers_height();
+        if let Some(height) = saved {
+            split.set_position(height);
+        }
+        // Halved again whenever the column changes height, until dragged.
+        let halving = Rc::new(Cell::new(saved.is_none()));
+        let placing = Rc::new(Cell::new(false));
+        let (half, guard) = (halving.clone(), placing.clone());
+        split.connect_max_position_notify(move |split| {
+            if half.get() {
+                guard.set(true);
+                split.set_position(split.max_position() / 2);
+                guard.set(false);
+            }
+        });
+        // Remembered only once dragged, a little after it stops moving. Our
+        // own halving and GTK clamping to a smaller window are not drags.
+        let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::default();
+        split.connect_position_notify(move |split| {
+            if placing.get() || !split.is_position_set() || split.position() == split.max_position()
+            {
+                return;
+            }
+            halving.set(false);
+            if let Some(source) = pending.borrow_mut().take() {
+                source.remove();
+            }
+            let (height, done) = (split.position(), pending.clone());
+            *pending.borrow_mut() = Some(glib::timeout_add_local_once(
+                Duration::from_millis(300),
+                move || {
+                    done.borrow_mut().take();
+                    settings::save_speakers_height(height);
+                },
+            ));
+        });
+        left.append(&split);
 
         let copy_button = gtk::Button::builder()
             .label("Copy transcript")
@@ -784,7 +842,7 @@ impl Recorder {
             add_actions_button,
             again_button,
             done_title_row,
-            done_group,
+            speakers_group,
             speaker_rows: RefCell::default(),
             again_language_row,
             done_icon,
@@ -2958,7 +3016,7 @@ impl Recorder {
     /// name share a row: that is how two voices that were one person are merged.
     fn show_speakers(self: &Rc<Self>) {
         for row in self.speaker_rows.borrow_mut().drain(..) {
-            self.done_group.remove(&row);
+            self.speakers_group.remove(&row);
         }
         let Some(manifest) = self.manifest.borrow().clone() else {
             return;
@@ -3007,7 +3065,7 @@ impl Recorder {
                 }
             });
             row.add_controller(focus);
-            self.done_group.add(&row);
+            self.speakers_group.add(&row);
             rows.push(row);
         }
         *self.speaker_rows.borrow_mut() = rows;
@@ -3544,7 +3602,7 @@ fn parse_segment(line: &str) -> Option<(&str, &str, &str)> {
 }
 
 /// The few styles libadwaita does not have: a see-through header bar over the
-/// animation, and the transcript card.
+/// animation, the transcript card and the handle between speakers and chapters.
 fn load_css() {
     let provider = gtk::CssProvider::new();
     provider.load_from_string(
@@ -3569,6 +3627,9 @@ fn load_css() {
          .transcript-editor { background: alpha(currentColor, 0.06); border-radius: 6px; padding: 4px 6px; }
          .transcript-editor text { background: transparent; }
          .done-icon { color: @accent_color; }
+         .speakers-split > separator { margin: 8px 24px; min-height: 1px; border-radius: 1px;
+                                       background: alpha(currentColor, 0.15); }
+         .speakers-split > separator:hover { background: alpha(currentColor, 0.35); }
          .player { padding: 6px 14px 6px 6px; }",
     );
     if let Some(display) = gtk::gdk::Display::default() {

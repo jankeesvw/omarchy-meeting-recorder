@@ -76,7 +76,7 @@ Drop an audio file on the window, or click **Import an audio file**: a phone mem
 
 The done screen puts the transcript on the right: the time, the speaker and the text in their own columns, one paragraph per turn. Above it sits a player with a waveform of both sides, your side above the line and the other side below it. Click or drag in the waveform to seek, or click any line to play from there. The line that is playing is highlighted and the transcript scrolls along.
 
-On the left: the meeting name and one row per speaker, which you can rename at any time (the folder, the transcript and the manifest follow, and your own name is remembered for next time; give two speakers the same name and they become one), the chapters, **Copy transcript** (also Enter), Open folder, New recording, and the language to transcribe again in.
+On the left: the meeting name and one row per speaker, which you can rename at any time (the folder, the transcript and the manifest follow, and your own name is remembered for next time; give two speakers the same name and they become one), the chapters (the speakers and the chapters each scroll on their own, and the line between them drags to give one more room; where you leave it is remembered), **Copy transcript** (also Enter), Open folder, New recording, and the language to transcribe again in.
 
 ![The done screen while playing: the current chapter selected and the current line highlighted](screenshots/done.webp)
 
