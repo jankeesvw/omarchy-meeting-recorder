@@ -26,9 +26,10 @@ use crate::audio::{CHANNELS, RATE};
 pub const WHISPER_RATE: usize = 16_000;
 
 /// (code, label) in the order of the dropdown. "auto" lets whisper detect it.
-pub const LANGUAGES: [(&str, &str); 8] = [
+pub const LANGUAGES: [(&str, &str); 9] = [
     ("auto", "Auto-detect"),
     ("en", "English"),
+    ("no", "Norwegian"),
     ("nl", "Dutch"),
     ("de", "German"),
     ("fr", "French"),
@@ -555,6 +556,7 @@ pub fn download(
 
 /// Transcribes the meeting. `language` is a whisper code or "auto".
 pub fn transcribe(
+    engine: &crate::openrouter::Engine,
     mic: &[f32],
     computer: &[f32],
     language: &str,
@@ -599,7 +601,11 @@ pub fn transcribe(
         &active_frames(&computer, computer.len().div_ceil(FRAME)),
     );
     let remote = voices(&computer, events, abort)?;
-    let context = load_whisper(events, abort)?;
+    let context = if engine.backend == crate::openrouter::Backend::Whisper {
+        Some(load_whisper(&engine.model, events, abort)?)
+    } else {
+        None
+    };
 
     let length = |regions: &[Region]| regions.iter().map(|r| r.end - r.start).sum::<usize>();
     let total = (length(&mic_regions) + length(&computer_regions)).max(1) as f64;
@@ -624,7 +630,8 @@ pub fn transcribe(
         }
         let share = length(regions) as f64 / total;
         let (lines, found) = side_pass(
-            &context,
+            context.as_ref(),
+            &engine.options,
             track,
             regions,
             speakers,
@@ -866,6 +873,7 @@ fn voice_heard(heard: Option<&[crate::diarize::Turn]>, start_ms: i64, end_ms: i6
 /// clustering decide, `Some(1)` skips finding speakers altogether. The lines
 /// are labelled "Speaker 1", "Speaker 2", ... in the order they first speak.
 pub fn transcribe_single(
+    engine: &crate::openrouter::Engine,
     track: &[f32],
     language: &str,
     speakers: Option<usize>,
@@ -899,6 +907,7 @@ pub fn transcribe_single(
     };
     let speakers = Speakers::Turns(turns);
     whisper_pass(
+        engine,
         &level,
         &regions,
         &speakers,
@@ -911,6 +920,7 @@ pub fn transcribe_single(
 
 /// The shared part: whisper over the stretches with sound, then the lines.
 fn whisper_pass(
+    engine: &crate::openrouter::Engine,
     mixed: &[f32],
     regions: &[Region],
     speakers: &Speakers,
@@ -919,9 +929,14 @@ fn whisper_pass(
     events: &Events,
     abort: &Abort,
 ) -> Result<Transcript, String> {
-    let context = load_whisper(events, abort)?;
+    let context = if engine.backend == crate::openrouter::Backend::Whisper {
+        Some(load_whisper(&engine.model, events, abort)?)
+    } else {
+        None
+    };
     let (segments, detected) = side_pass(
-        &context,
+        context.as_ref(),
+        &engine.options,
         mixed,
         regions,
         speakers,
@@ -943,8 +958,8 @@ fn whisper_pass(
     })
 }
 
-fn load_whisper(events: &Events, abort: &Abort) -> Result<WhisperContext, String> {
-    let model = crate::models::ensure(events, abort)?;
+fn load_whisper(name: &str, events: &Events, abort: &Abort) -> Result<WhisperContext, String> {
+    let model = crate::models::ensure_named(name, events, abort)?;
     if abort.load(Ordering::Relaxed) {
         return Err(CANCELLED.into());
     }
@@ -956,7 +971,7 @@ fn load_whisper(events: &Events, abort: &Abort) -> Result<WhisperContext, String
     // Word times aligned on the attention heads (DTW): the plain token times
     // drift by up to a second, too much to tell where one speaker takes over.
     // A model file of unknown kind gets plain token times.
-    if let Some(model_preset) = crate::models::dtw_preset() {
+    if let Some(model_preset) = crate::models::dtw_preset(name) {
         context_params.dtw_parameters(DtwParameters {
             mode: DtwMode::ModelPreset { model_preset },
             ..Default::default()
@@ -970,7 +985,8 @@ fn load_whisper(events: &Events, abort: &Abort) -> Result<WhisperContext, String
 /// Progress runs from `progress.0` to `progress.1`.
 #[allow(clippy::too_many_arguments)]
 fn side_pass(
-    context: &WhisperContext,
+    context: Option<&WhisperContext>,
+    options: &serde_json::Value,
     track: &[f32],
     regions: &[Region],
     speakers: &Speakers,
@@ -982,12 +998,49 @@ fn side_pass(
 ) -> Result<(Vec<Segment>, Option<String>), String> {
     let glued = Glued::new(track, regions);
     emit(events, Event::Stage("Transcribing".into()));
-    let (words, detected) =
-        run_whisper(context, &glued, speakers, language, progress, events, abort)?;
-    Ok((
-        phrases(&words, &glued, speakers, track, paragraphs),
-        detected,
-    ))
+    let (words, detected) = if let Some(context) = context {
+        run_whisper(context, &glued, speakers, language, progress, events, abort)?
+    } else {
+        let (words, language) = crate::openrouter::transcribe(
+            options,
+            &glued.samples,
+            language,
+            progress,
+            events,
+            abort,
+        )?;
+        (
+            words
+                .into_iter()
+                .map(|w| Word {
+                    text: w.text,
+                    start_ms: w.start_ms,
+                    end_ms: w.end_ms,
+                    no_speech: 0.0,
+                    segment: 0,
+                })
+                .collect(),
+            language,
+        )
+    };
+    let timing = if context.is_some() {
+        WordTiming::Whisper
+    } else {
+        WordTiming::Provider
+    };
+    let mut lines = phrases(&words, &glued, speakers, track, paragraphs, timing);
+    if timing == WordTiming::Provider {
+        lines.sort_by_key(|line| line.start_ms);
+    }
+    if context.is_none() {
+        for line in &lines {
+            emit(
+                events,
+                Event::Segment(format!("{}: {}", line.speaker, line.text)),
+            );
+        }
+    }
+    Ok((lines, detected))
 }
 
 /// A word with its times in the glued buffer, and how sure whisper was that
@@ -1125,6 +1178,12 @@ const PARAGRAPH_PAUSE_MS: i64 = 3000;
 /// Very long turns are still split, so a line stays a useful place to jump to.
 const PARAGRAPH_MAX_MS: i64 = 90_000;
 
+#[derive(Clone, Copy, PartialEq)]
+enum WordTiming {
+    Whisper,
+    Provider,
+}
+
 /// Groups the words into the lines of the transcript: a new line where the
 /// speaker changes, where a sentence ends on another speaker, and at every
 /// stretch of silence. Timestamps are put back on the real timeline.
@@ -1134,6 +1193,7 @@ fn phrases(
     speakers: &Speakers,
     mixed: &[f32],
     paragraphs: bool,
+    timing: WordTiming,
 ) -> Vec<Segment> {
     struct Phrase {
         words: Vec<String>,
@@ -1171,6 +1231,9 @@ fn phrases(
                     && !sentence_ended
                     && !turn_at_pause =>
             {
+                if timing == WordTiming::Provider {
+                    p.start_ms = p.start_ms.min(start);
+                }
                 p.words.push(word.text.clone());
                 p.end_ms = end.max(p.end_ms);
                 p.no_speech = p.no_speech.max(word.no_speech);
@@ -1190,6 +1253,9 @@ fn phrases(
     // tends to put them at the start of the padding instead.
     let mut previous_region = usize::MAX;
     for piece in &mut pieces {
+        if timing == WordTiming::Provider {
+            continue; // Provider word times already describe actual speech.
+        }
         if piece.region != previous_region
             && let Some((_, region)) = glued.map.get(piece.region)
         {
@@ -1216,6 +1282,9 @@ fn phrases(
                 if !ends_sentence(previous.words.last().map_or("", String::as_str))
                     && piece.start_ms - previous.end_ms < 3000 =>
             {
+                if timing == WordTiming::Provider {
+                    previous.start_ms = previous.start_ms.min(piece.start_ms);
+                }
                 previous.words.extend(piece.words);
                 previous.end_ms = piece.end_ms.max(previous.end_ms);
                 previous.no_speech = previous.no_speech.max(piece.no_speech);
@@ -1239,7 +1308,10 @@ fn phrases(
         // guessed; keep the order of lines intact.
         let mut piece = piece;
         let changed = segments.last().is_none_or(|last| last.speaker != speaker);
-        if changed && let Some(start) = speakers.takeover_ms(&speaker, piece.start_ms) {
+        if timing == WordTiming::Whisper
+            && changed
+            && let Some(start) = speakers.takeover_ms(&speaker, piece.start_ms)
+        {
             let floor = segments.last().map_or(0, |last| last.start_ms + 1);
             piece.start_ms = start.max(floor);
             piece.end_ms = piece.end_ms.max(piece.start_ms + 1);
@@ -1256,7 +1328,12 @@ fn phrases(
             {
                 last.text.push(' ');
                 last.text.push_str(&text);
-                last.end_ms = piece.end_ms;
+                if timing == WordTiming::Provider {
+                    last.start_ms = last.start_ms.min(piece.start_ms);
+                    last.end_ms = last.end_ms.max(piece.end_ms);
+                } else {
+                    last.end_ms = piece.end_ms;
+                }
             }
             _ => segments.push(Segment {
                 start_ms: piece.start_ms,
@@ -1401,9 +1478,17 @@ pub fn to_markdown(title: &str, date: &str, transcript: &Transcript) -> String {
 pub fn cli(args: &[String]) -> glib::ExitCode {
     let mut files = Vec::new();
     let mut language = "auto".to_owned();
+    let mut backend = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--backend" => match iter
+                .next()
+                .and_then(|s| crate::openrouter::Backend::parse(s).ok())
+            {
+                Some(value) => backend = Some(value),
+                None => return usage(),
+            },
             "--language" | "-l" => match iter.next() {
                 Some(code) => language = code.clone(),
                 None => return usage(),
@@ -1421,7 +1506,14 @@ pub fn cli(args: &[String]) -> glib::ExitCode {
     run_cli(|events, abort| {
         let mic = load_track(mic_path)?;
         let computer = load_track(computer_path)?;
-        transcribe(&mic, &computer, &language, events, abort)
+        transcribe(
+            &crate::openrouter::Backend::prepare(backend)?,
+            &mic,
+            &computer,
+            &language,
+            events,
+            abort,
+        )
     })
 }
 
@@ -1429,10 +1521,18 @@ pub fn cli(args: &[String]) -> glib::ExitCode {
 pub fn cli_file(args: &[String]) -> glib::ExitCode {
     let mut files = Vec::new();
     let mut language = "auto".to_owned();
+    let mut backend = None;
     let mut speakers = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--backend" => match iter
+                .next()
+                .and_then(|s| crate::openrouter::Backend::parse(s).ok())
+            {
+                Some(value) => backend = Some(value),
+                None => return usage(),
+            },
             "--language" | "-l" => match iter.next() {
                 Some(code) => language = code.clone(),
                 None => return usage(),
@@ -1453,7 +1553,14 @@ pub fn cli_file(args: &[String]) -> glib::ExitCode {
     };
     run_cli(|events, abort| {
         let track = load_track(path)?;
-        transcribe_single(&track, &language, speakers, events, abort)
+        transcribe_single(
+            &crate::openrouter::Backend::prepare(backend)?,
+            &track,
+            &language,
+            speakers,
+            events,
+            abort,
+        )
     })
 }
 
@@ -1508,10 +1615,10 @@ fn run_cli(work: impl FnOnce(&Events, &Abort) -> Result<Transcript, String>) -> 
 
 fn usage() -> glib::ExitCode {
     eprintln!(
-        "Usage: {APP_NAME} transcribe <mic> <computer> [--language auto|en|nl|...] [--model name]"
+        "Usage: {APP_NAME} transcribe <mic> <computer> [--backend whisper|openrouter] [--language auto|en|no|...] [--model name]"
     );
     eprintln!(
-        "       {APP_NAME} transcribe-file <audio> [--speakers N] [--language auto|en|nl|...] [--model name]"
+        "       {APP_NAME} transcribe-file <audio> [--speakers N] [--backend whisper|openrouter] [--language auto|en|no|...] [--model name]"
     );
     glib::ExitCode::from(2)
 }
@@ -1519,6 +1626,142 @@ fn usage() -> glib::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlapping_provider_sentences_preserve_text_and_bounds() {
+        let track = vec![0.1; WHISPER_RATE * 3];
+        let glued = Glued::new(
+            &track,
+            &[Region {
+                start: 0,
+                onset: 0,
+                end: track.len(),
+            }],
+        );
+        let speakers = Speakers::Side("You", vec![]);
+        let words: Vec<Word> = [
+            ("First", 1000, 1300),
+            ("sentence.", 1300, 1800),
+            ("Second", 900, 1200),
+            ("sentence.", 1200, 1500),
+        ]
+        .into_iter()
+        .map(|(text, start_ms, end_ms)| Word {
+            text: text.into(),
+            start_ms,
+            end_ms,
+            no_speech: 0.0,
+            segment: 0,
+        })
+        .collect();
+        let out = phrases(
+            &words,
+            &glued,
+            &speakers,
+            &track,
+            true,
+            WordTiming::Provider,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].text, "First sentence. Second sentence.");
+        assert_eq!((out[0].start_ms, out[0].end_ms), (900, 1800));
+    }
+
+    #[test]
+    fn provider_start_is_not_snapped_to_voice_onset() {
+        let track = vec![0.1; WHISPER_RATE * 3];
+        let glued = Glued::new(
+            &track,
+            &[Region {
+                start: 0,
+                onset: 0,
+                end: track.len(),
+            }],
+        );
+        let speakers = Speakers::Turns(vec![crate::diarize::Turn {
+            start_ms: 0,
+            end_ms: 3000,
+            speaker: 0,
+        }]);
+        let words = vec![Word {
+            text: "Hello.".into(),
+            start_ms: 500,
+            end_ms: 900,
+            no_speech: 0.0,
+            segment: 0,
+        }];
+        let out = phrases(
+            &words,
+            &glued,
+            &speakers,
+            &track,
+            false,
+            WordTiming::Provider,
+        );
+        assert_eq!((out[0].start_ms, out[0].end_ms), (500, 900));
+    }
+
+    #[test]
+    fn provider_word_times_preserve_speaker_and_duration() {
+        let track = vec![0.1; WHISPER_RATE * 3];
+        let glued = Glued::new(
+            &track,
+            &[Region {
+                start: 0,
+                onset: 0,
+                end: track.len(),
+            }],
+        );
+        let speakers = Speakers::Turns(vec![
+            crate::diarize::Turn {
+                start_ms: 0,
+                end_ms: 1000,
+                speaker: 0,
+            },
+            crate::diarize::Turn {
+                start_ms: 1000,
+                end_ms: 3000,
+                speaker: 1,
+            },
+        ]);
+        let words: Vec<Word> = (0..10)
+            .map(|i| Word {
+                text: if i == 9 {
+                    "word.".into()
+                } else {
+                    "word".into()
+                },
+                start_ms: i * 100,
+                end_ms: (i + 1) * 100,
+                no_speech: 0.0,
+                segment: 0,
+            })
+            .collect();
+        let out = phrases(
+            &words,
+            &glued,
+            &speakers,
+            &track,
+            false,
+            WordTiming::Provider,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].start_ms, out[0].end_ms), (0, 1000));
+        assert_eq!(
+            out[0].speaker, "Speaker 1",
+            "actual output: {}–{} ms",
+            out[0].start_ms, out[0].end_ms
+        );
+        let whisper = phrases(
+            &words,
+            &glued,
+            &speakers,
+            &track,
+            false,
+            WordTiming::Whisper,
+        );
+        assert_eq!(whisper[0].end_ms, 2500);
+    }
 
     fn line(start_ms: i64, speaker: &str, text: &str) -> Segment {
         Segment {

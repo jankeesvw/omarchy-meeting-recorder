@@ -14,6 +14,7 @@ mod ipc;
 mod meeting;
 mod models;
 mod nemotron;
+mod openrouter;
 mod player;
 mod settings;
 mod theme;
@@ -93,6 +94,10 @@ fn main() -> glib::ExitCode {
             println!("  pause         pause or resume the running recording");
             println!("  watch         stream the recorder state as NDJSON, for the bar widget");
             println!("  transcribe    transcribe two tracks and print the transcript as Markdown");
+            println!("  transcribe-file  transcribe one audio file [--speakers N]");
+            println!(
+                "                Both accept --backend whisper|openrouter and --language auto|en|no|..."
+            );
             println!(
                 "  ask           run a prompt over stdin through the default agent, without tools"
             );

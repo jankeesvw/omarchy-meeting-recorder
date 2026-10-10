@@ -1826,6 +1826,10 @@ impl Recorder {
         if self.model_downloading.get() {
             return;
         }
+        if crate::openrouter::Backend::configured() == crate::openrouter::Backend::OpenRouter {
+            self.model_banner.set_revealed(false);
+            return;
+        }
         match crate::models::missing() {
             Some((name, size_mb)) => {
                 let size = if size_mb >= 1000 {
@@ -2036,6 +2040,8 @@ impl Recorder {
         self.animation.set_progress(0.0);
         self.animation.set_running(true);
 
+        let engine = crate::openrouter::Backend::prepare(None)?;
+        let model = engine.model.clone();
         let abort = Abort::default();
         *self.abort.borrow_mut() = Some(abort.clone());
         let (events_tx, events_rx) = async_channel::unbounded::<Event>();
@@ -2043,7 +2049,9 @@ impl Recorder {
         std::thread::spawn(move || {
             let result = match tracks {
                 Tracks::Single(path, speakers) => transcribe::load_track(&path).and_then(|track| {
-                    transcribe::transcribe_single(&track, language, speakers, &events_tx, &abort)
+                    transcribe::transcribe_single(
+                        &engine, &track, language, speakers, &events_tx, &abort,
+                    )
                 }),
                 Tracks::Raw(dir) | Tracks::Kept(dir) => {
                     let (mic_path, computer_path) = if dir.join("mic.raw").exists() {
@@ -2053,7 +2061,9 @@ impl Recorder {
                     };
                     transcribe::load_track(&mic_path).and_then(|mic| {
                         let computer = transcribe::load_track(&computer_path)?;
-                        transcribe::transcribe(&mic, &computer, language, &events_tx, &abort)
+                        transcribe::transcribe(
+                            &engine, &mic, &computer, language, &events_tx, &abort,
+                        )
                     })
                 }
             };
@@ -2169,7 +2179,7 @@ impl Recorder {
                 .collect();
             markdown = meeting::relabel_all(&markdown, &renames);
             manifest.language = language.to_owned();
-            manifest.model = Some(crate::models::configured());
+            manifest.model = Some(model);
             manifest.title = self.title();
             // Chapters of a previous transcript would point at lines that are gone.
             manifest.chapters.clear();
