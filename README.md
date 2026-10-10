@@ -116,10 +116,11 @@ If the app quits while it records (a crash, a logout, a power cut), the next sta
 
 ## Handy to know
 
-- **Keyboard.** Ctrl+M switches between the full window and the compact strip. Ctrl+N opens another window. On the done page Enter copies the transcript. Ctrl+W closes the window and Ctrl+Q all of them, and they ask first while recording or transcribing.
+- **Keyboard.** Ctrl+M switches between the full window and the compact strip. Ctrl+O lists earlier meetings. Ctrl+N opens another window. On the done page Enter copies the transcript. Ctrl+W closes the window and Ctrl+Q all of them, and they ask first while recording or transcribing.
 - **The name** stays editable all the time. After the transcript is done, changing it (Enter, or leaving the field) renames the meeting folder and the heading in the transcript.
 - **Closing** while recording or transcribing asks first. You can stop and close, let the transcription finish in the background and quit afterwards, or cancel the transcription; the audio is kept either way.
 - **Opening a meeting later.** Double-click its `.meeting-recorder` file, or run `omarchy-meeting-recorder <folder>`. It opens on the done page with the settings it was made with. When the window is busy recording or transcribing, the meeting opens in a window of its own.
+- **Earlier meetings.** The clock button in the header bar (or Ctrl+O) lists every meeting in `~/Documents/Meetings`, newest first, with its date and length. Type to search by name or date; pick one to open it on the done page. While this window records or transcribes, the meeting opens in another one.
 - **More than one window.** Ctrl+N, `omarchy-meeting-recorder new-window` or New Window in the launcher opens another one, to read an older meeting or start the next while the last one is still transcribing. Every window shows its own meeting; one records at a time. The bar widget and the keybindings follow the window that is recording, else the one transcribing.
 - **Keybindings.** `omarchy-meeting-recorder start`, `pause`, `stop` and `compact` control the running app, so you can bind them to keys in Hyprland.
 

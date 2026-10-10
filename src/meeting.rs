@@ -255,6 +255,32 @@ pub fn open(path: &Path) -> Option<(PathBuf, Manifest)> {
     Some((dir, manifest))
 }
 
+/// Where every meeting gets its own folder.
+pub fn root() -> PathBuf {
+    gtk::glib::home_dir().join("Documents/Meetings")
+}
+
+/// The meetings in `root()`, newest first.
+pub fn list() -> Vec<(PathBuf, Manifest)> {
+    list_in(&root())
+}
+
+/// The meeting folders directly in `root`, newest first. Anything that is not
+/// a meeting is left out.
+fn list_in(root: &Path) -> Vec<(PathBuf, Manifest)> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut meetings: Vec<_> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .filter_map(|dir| open(&dir))
+        .collect();
+    meetings.sort_by_key(|(_, m)| std::cmp::Reverse(m.started_at));
+    meetings
+}
+
 /// `202609241400 Weekly sync` plus whatever audio files are there.
 fn from_folder(dir: &Path) -> Option<Manifest> {
     let name = dir.file_name()?.to_str()?;
@@ -295,7 +321,7 @@ fn from_folder(dir: &Path) -> Option<Manifest> {
 
 #[cfg(test)]
 mod tests {
-    use super::{relabel, side_of};
+    use super::{list_in, relabel, side_of};
 
     #[test]
     fn labels_tell_the_side_and_number() {
@@ -318,7 +344,8 @@ mod tests {
 
     #[test]
     fn speakers_with_the_same_name_are_one_person() {
-        let mut manifest = super::from_folder(std::path::Path::new("/nowhere/202609291404 Call")).unwrap();
+        let mut manifest =
+            super::from_folder(std::path::Path::new("/nowhere/202609291404 Call")).unwrap();
         manifest.speakers = vec!["Jankees".into(), "Jankees".into(), "Denise".into()];
         assert_eq!(manifest.people(), vec!["Jankees", "Denise"]);
     }
@@ -330,5 +357,25 @@ mod tests {
         let out = relabel(&tmp, "\u{1}", "Remote");
         assert!(out.contains("**[00:01] Remote:** Hi."));
         assert!(out.contains("**[00:03] You:** You: said hi."));
+    }
+
+    #[test]
+    fn lists_meeting_folders_newest_first() {
+        let root = std::env::temp_dir().join(format!("omr-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let newer = root.join("Newer");
+        std::fs::create_dir_all(&newer).unwrap();
+        std::fs::write(
+            newer.join("Newer.meeting-recorder"),
+            r#"{"title": "Newer", "started_at": 1900000000}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("202001020304 Older")).unwrap();
+        std::fs::create_dir_all(root.join("Not a meeting")).unwrap();
+        std::fs::write(root.join("stray.txt"), "").unwrap();
+
+        let titles: Vec<String> = list_in(&root).into_iter().map(|(_, m)| m.title).collect();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(titles, ["Newer", "Older"]);
     }
 }
