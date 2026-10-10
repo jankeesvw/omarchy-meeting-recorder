@@ -76,6 +76,18 @@ pub fn save_your_name(name: &str) {
     save("your_name", name);
 }
 
+/// How tall the speaker list is next to the chapters, once you dragged it.
+pub fn load_speakers_height() -> Option<i32> {
+    load()["speakers_height"]
+        .as_str()
+        .and_then(|s| s.parse().ok())
+        .filter(|h| *h > 0)
+}
+
+pub fn save_speakers_height(height: i32) {
+    save("speakers_height", &height.to_string());
+}
+
 /// Whether the app already asked to put its widget in the bar.
 pub fn bar_widget_offered() -> bool {
     load()["bar_widget_offered"].as_str() == Some("yes")
