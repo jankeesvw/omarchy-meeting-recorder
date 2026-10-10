@@ -247,6 +247,7 @@ pub fn run(open: Option<&str>) -> glib::ExitCode {
             }
         });
         app.set_accels_for_action("win.compact", &["<Control>m"]);
+        app.set_accels_for_action("win.history", &["<Control>o"]);
         app.set_accels_for_action("window.close", &["<Control>w"]);
         app.set_accels_for_action("app.quit", &["<Control>q"]);
         app.set_accels_for_action("app.new-window", &["<Control>n"]);
@@ -299,6 +300,12 @@ struct Recorder {
     layout: gtk::Stack,
     compact_action: gio::SimpleAction,
     compact_button: gtk::Button,
+    /// Opens the list of earlier meetings.
+    history_button: gtk::MenuButton,
+    history_search: gtk::SearchEntry,
+    history_list: gtk::ListBox,
+    /// Folder of each row in the history list, and the text a search matches.
+    history: RefCell<Vec<(PathBuf, String)>>,
     title_row: adw::EntryRow,
     format_row: adw::ComboRow,
     language_row: adw::ComboRow,
@@ -404,6 +411,42 @@ impl Recorder {
             .action_name("win.compact")
             .build();
         header.pack_start(&compact_button);
+
+        // Earlier meetings, searchable, filled each time the list opens.
+        let history_search = gtk::SearchEntry::builder()
+            .placeholder_text("Search meetings")
+            .build();
+        let history_list = gtk::ListBox::builder()
+            .css_classes(["navigation-sidebar"])
+            .activate_on_single_click(true)
+            .build();
+        history_list.set_placeholder(Some(
+            &gtk::Label::builder()
+                .label("No meetings yet")
+                .css_classes(["dim-label"])
+                .margin_top(14)
+                .margin_bottom(14)
+                .build(),
+        ));
+        let history_scroll = gtk::ScrolledWindow::builder()
+            .child(&history_list)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_height(true)
+            .max_content_height(420)
+            .width_request(340)
+            .build();
+        let history_box = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(6)
+            .build();
+        history_box.append(&history_search);
+        history_box.append(&history_scroll);
+        let history_button = gtk::MenuButton::builder()
+            .icon_name("document-open-recent-symbolic")
+            .tooltip_text("Previous meetings (Ctrl+O)")
+            .popover(&gtk::Popover::builder().child(&history_box).build())
+            .build();
+        header.pack_start(&history_button);
         view.add_top_bar(&header);
         // Under the header bar, full width, while the speech model still has
         // to be downloaded.
@@ -759,6 +802,14 @@ impl Recorder {
         window.add_action(&compact_action);
         let run_action = gio::SimpleAction::new("run-action", Some(glib::VariantTy::INT32));
         window.add_action(&run_action);
+        let history_action = gio::SimpleAction::new("history", None);
+        let history_open = history_button.clone();
+        history_action.connect_activate(move |_, _| {
+            if history_open.is_visible() {
+                history_open.popup();
+            }
+        });
+        window.add_action(&history_action);
 
         let recorder = Rc::new(Recorder {
             window,
@@ -767,6 +818,10 @@ impl Recorder {
             layout,
             compact_action,
             compact_button,
+            history_button,
+            history_search,
+            history_list,
+            history: RefCell::default(),
             title_row,
             format_row,
             language_row,
@@ -931,6 +986,63 @@ impl Recorder {
         self.pause_button.connect_clicked(move |_| {
             if let Some(r) = weak.upgrade() {
                 r.toggle_pause();
+            }
+        });
+
+        if let Some(popover) = self.history_button.popover() {
+            let weak = Rc::downgrade(self);
+            popover.connect_show(move |_| {
+                if let Some(r) = weak.upgrade() {
+                    r.fill_history();
+                    r.history_search.grab_focus();
+                }
+            });
+            let search = self.history_search.clone();
+            popover.connect_hide(move |_| search.set_text(""));
+        }
+        let weak = Rc::downgrade(self);
+        self.history_list.set_filter_func(move |row| {
+            let Some(r) = weak.upgrade() else {
+                return true;
+            };
+            let query = r.history_search.text().to_lowercase();
+            let query = query.trim();
+            query.is_empty()
+                || r.history
+                    .borrow()
+                    .get(row.index() as usize)
+                    .is_some_and(|(_, text)| text.contains(query))
+        });
+        let list = self.history_list.clone();
+        self.history_search
+            .connect_search_changed(move |_| list.invalidate_filter());
+        let weak = Rc::downgrade(self);
+        self.history_search.connect_activate(move |_| {
+            // Enter opens the first meeting that matches.
+            if let Some(r) = weak.upgrade() {
+                let mut i = 0;
+                while let Some(row) = r.history_list.row_at_index(i) {
+                    if row.is_child_visible() {
+                        row.activate();
+                        return;
+                    }
+                    i += 1;
+                }
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.history_list.connect_row_activated(move |_, row| {
+            let Some(r) = weak.upgrade() else {
+                return;
+            };
+            let dir = r
+                .history
+                .borrow()
+                .get(row.index() as usize)
+                .map(|(d, _)| d.clone());
+            r.history_button.popdown();
+            if let Some(dir) = dir {
+                r.open_meeting(&dir);
             }
         });
 
@@ -1464,6 +1576,7 @@ impl Recorder {
         self.fit_window(if page == "done" { DONE_SIZE } else { FULL_SIZE });
         let immersive = matches!(state, State::Stopping | State::Transcribing);
         self.view.set_extend_content_to_top_edge(immersive);
+        self.history_button.set_visible(!immersive);
         if immersive {
             self.window.add_css_class("immersive");
         } else {
@@ -2272,6 +2385,65 @@ impl Recorder {
     }
 
     /// Shows a saved meeting on the done page, with the settings it was made with.
+    /// Lists the meetings on disk, newest first, the open one marked.
+    fn fill_history(&self) {
+        while let Some(row) = self.history_list.row_at_index(0) {
+            self.history_list.remove(&row);
+        }
+        let current = self.result_dir.borrow().clone();
+        let mut history = Vec::new();
+        for (dir, manifest) in meeting::list() {
+            let date = glib::DateTime::from_unix_local(manifest.started_at)
+                .and_then(|t| t.format("%a %e %b %Y, %H:%M"))
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let mut detail = date.clone();
+            if manifest.duration_secs > 0 {
+                detail.push_str("  ·  ");
+                detail.push_str(&format_elapsed(manifest.duration_secs));
+            }
+            let text = gtk::Box::builder()
+                .orientation(gtk::Orientation::Vertical)
+                .spacing(2)
+                .hexpand(true)
+                .build();
+            text.append(
+                &gtk::Label::builder()
+                    .label(&manifest.title)
+                    .xalign(0.0)
+                    .ellipsize(gtk::pango::EllipsizeMode::End)
+                    .build(),
+            );
+            text.append(
+                &gtk::Label::builder()
+                    .label(&detail)
+                    .xalign(0.0)
+                    .css_classes(["dim-label", "caption"])
+                    .build(),
+            );
+            let content = gtk::Box::builder()
+                .spacing(8)
+                .margin_top(4)
+                .margin_bottom(4)
+                .build();
+            content.append(&text);
+            if current.as_ref() == Some(&dir) {
+                content.append(
+                    &gtk::Image::builder()
+                        .icon_name("object-select-symbolic")
+                        .tooltip_text("Open now")
+                        .css_classes(["done-icon"])
+                        .build(),
+                );
+            }
+            self.history_list
+                .append(&gtk::ListBoxRow::builder().child(&content).build());
+            history.push((dir, format!("{} {date}", manifest.title).to_lowercase()));
+        }
+        *self.history.borrow_mut() = history;
+        self.history_list.invalidate_filter();
+    }
+
     fn open_meeting(self: &Rc<Self>, path: &std::path::Path) {
         if matches!(
             self.state.get(),
@@ -3208,9 +3380,7 @@ fn output_dir(started_at: i64, title: &str) -> PathBuf {
         .and_then(|t| t.format("%Y%m%d%H%M"))
         .map(|s| s.to_string())
         .unwrap_or_default();
-    glib::home_dir()
-        .join("Documents/Meetings")
-        .join(format!("{stamp} {}", safe_name(title)))
+    meeting::root().join(format!("{stamp} {}", safe_name(title)))
 }
 
 fn row_count(list: &gtk::ListBox) -> i32 {
