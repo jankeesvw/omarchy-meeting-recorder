@@ -224,6 +224,13 @@ impl Hub {
                 }
                 r.start();
             }
+            "auto-start" if matches!(r.state.get(), State::Idle | State::Done) => {
+                if r.state.get() == State::Done {
+                    r.ready();
+                }
+                r.apply_meeting_title((!title.is_empty()).then_some(title));
+                r.start();
+            }
             "stop" => r.stop(),
             "compact" => r.set_compact(!r.compact.get()),
             "pause" => r.toggle_pause(),
@@ -247,6 +254,7 @@ pub fn run(open: Option<&str>) -> glib::ExitCode {
             }
         });
         app.set_accels_for_action("win.compact", &["<Control>m"]);
+        app.set_accels_for_action("win.preferences", &["<Control>comma"]);
         app.set_accels_for_action("window.close", &["<Control>w"]);
         app.set_accels_for_action("app.quit", &["<Control>q"]);
         app.set_accels_for_action("app.new-window", &["<Control>n"]);
@@ -300,6 +308,8 @@ struct Recorder {
     compact_action: gio::SimpleAction,
     compact_button: gtk::Button,
     title_row: adw::EntryRow,
+    suggested_title: RefCell<Option<String>>,
+    recording_generation: Cell<u64>,
     format_row: adw::ComboRow,
     language_row: adw::ComboRow,
     animation: TranscribeAnimation,
@@ -404,6 +414,12 @@ impl Recorder {
             .action_name("win.compact")
             .build();
         header.pack_start(&compact_button);
+        let preferences_button = gtk::Button::builder()
+            .icon_name("emblem-system-symbolic")
+            .tooltip_text("Preferences (Ctrl+,)")
+            .action_name("win.preferences")
+            .build();
+        header.pack_end(&preferences_button);
         view.add_top_bar(&header);
         // Under the header bar, full width, while the speech model still has
         // to be downloaded.
@@ -768,6 +784,8 @@ impl Recorder {
             compact_action,
             compact_button,
             title_row,
+            suggested_title: RefCell::default(),
+            recording_generation: Cell::new(0),
             format_row,
             language_row,
             animation,
@@ -832,8 +850,111 @@ impl Recorder {
             manifest: RefCell::default(),
         });
         recorder.connect_signals(&open_button, &new_button);
+        let weak = Rc::downgrade(&recorder);
+        let preferences_action = gio::SimpleAction::new("preferences", None);
+        preferences_action.connect_activate(move |_, _| {
+            if let Some(r) = weak.upgrade() {
+                r.show_preferences();
+            }
+        });
+        recorder.window.add_action(&preferences_action);
+        recorder.follow_meeting_title();
         recorder.render();
         recorder
+    }
+
+    fn show_preferences(self: &Rc<Self>) {
+        let dialog = adw::PreferencesDialog::new();
+        dialog.set_title("Preferences");
+        let page = adw::PreferencesPage::new();
+        let group = adw::PreferencesGroup::builder()
+            .title("Meeting detection")
+            .description("Supports Zoom and Google Meet on Hyprland. A meeting name must be available in the window title. Browser tabs are detectable only while visible in their browser window.")
+            .build();
+        let title_row = adw::SwitchRow::builder()
+            .title("Detect meeting title")
+            .subtitle("Suggest a name before recording. Names you type take precedence.")
+            .active(settings::auto_detect_title())
+            .build();
+        title_row.connect_active_notify(|row| settings::set_auto_detect_title(row.is_active()));
+        group.add(&title_row);
+        let stop_row = adw::SwitchRow::builder()
+            .title("Stop recording automatically")
+            .subtitle("Associate new recordings with a single detected meeting. Stop after its window closes or shows a recognized ended state for 30 seconds. Leaving Google Meet may not change its title: close the meeting window or stop manually.")
+            .active(settings::auto_stop()).build();
+        stop_row.connect_active_notify(|row| settings::set_auto_stop(row.is_active()));
+        group.add(&stop_row);
+        let start_row = adw::SwitchRow::builder()
+            .title("Start recording automatically")
+            .subtitle("Open the recorder for detected Zoom or Google Meet windows, even while this app is closed. Repeats are suppressed for two hours. An open meeting or preview tab can trigger again afterward. Stop manually unless automatic stopping is enabled.")
+            .active(crate::auto_record::enabled())
+            .build();
+        group.add(&start_row);
+        let updating = Rc::new(Cell::new(false));
+        let weak = Rc::downgrade(self);
+        start_row.connect_active_notify(move |row| {
+            if updating.replace(true) {
+                return;
+            }
+            let enabled = row.is_active();
+            row.set_sensitive(false);
+            let row = row.clone();
+            let updating = updating.clone();
+            let weak = weak.clone();
+            glib::spawn_future_local(async move {
+                let result = gio::spawn_blocking(move || crate::auto_record::set_enabled(enabled))
+                    .await
+                    .unwrap_or_else(|_| Err("Could not change automatic recording".into()));
+                if let Err(message) = result {
+                    row.set_active(!enabled);
+                    if let Some(r) = weak.upgrade() {
+                        r.toast(&message);
+                    }
+                }
+                row.set_sensitive(true);
+                updating.set(false);
+            });
+        });
+        page.add(&group);
+        dialog.add(&page);
+        dialog.present(Some(&self.window));
+    }
+
+    fn apply_meeting_title(&self, title: Option<&str>) {
+        if !matches!(self.state.get(), State::Idle | State::Recording)
+            || !settings::auto_detect_title()
+        {
+            return;
+        }
+        let next = crate::meeting_detection::suggested_title(
+            self.title_row.text().as_str(),
+            self.suggested_title.borrow().as_deref(),
+            title,
+        );
+        if let Some(next) = next {
+            self.title_row.set_text(&next);
+            *self.suggested_title.borrow_mut() = (!next.is_empty()).then_some(next);
+        }
+    }
+
+    fn follow_meeting_title(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            loop {
+                glib::timeout_future_seconds(2).await;
+                let Some(r) = weak.upgrade() else { break };
+                if r.state.get() != State::Idle || !settings::auto_detect_title() {
+                    continue;
+                }
+                let result = gio::spawn_blocking(crate::meeting_detection::clients).await;
+                if let Ok(Ok(clients)) = result
+                    && r.state.get() == State::Idle
+                {
+                    let detected = crate::meeting_detection::unique(&clients);
+                    r.apply_meeting_title(detected.as_ref().and_then(|m| m.title.as_deref()));
+                }
+            }
+        });
     }
 
     fn connect_signals(self: &Rc<Self>, open_button: &gtk::Button, new_button: &gtk::Button) {
@@ -1888,10 +2009,86 @@ impl Recorder {
         *self.result_dir.borrow_mut() = None;
         *self.manifest.borrow_mut() = None;
         self.title_row.set_text("");
+        *self.suggested_title.borrow_mut() = None;
         self.timer.set_label("00:00");
         self.compact_timer.set_label("00:00");
         self.set_state(State::Idle);
         self.update_model_banner();
+    }
+
+    fn follow_meeting_end(self: &Rc<Self>, generation: u64) {
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let Ok(Ok(clients)) = gio::spawn_blocking(crate::meeting_detection::clients).await
+            else {
+                return;
+            };
+            let Some(mut watch) = crate::auto_stop::Watch::bind(&clients) else {
+                return;
+            };
+            loop {
+                glib::timeout_future_seconds(2).await;
+                let Some(r) = weak.upgrade() else {
+                    return;
+                };
+                if r.recording_generation.get() != generation
+                    || !matches!(r.state.get(), State::Recording)
+                    || !settings::auto_stop()
+                {
+                    return;
+                }
+                drop(r);
+                let result = gio::spawn_blocking(crate::meeting_detection::clients).await;
+                let clients = result.ok().and_then(Result::ok);
+                if watch.observe(clients.as_deref(), std::time::Instant::now()) {
+                    let Some(r) = weak.upgrade() else {
+                        return;
+                    };
+                    // A manual Stop/new recording can happen while the query runs.
+                    if r.recording_generation.get() == generation
+                        && matches!(r.state.get(), State::Recording)
+                        && settings::auto_stop()
+                    {
+                        r.toast("Meeting ended: stopping recording");
+                        r.stop();
+                    }
+                    return;
+                }
+            }
+        });
+    }
+
+    fn follow_recording_title(self: &Rc<Self>, generation: u64) {
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let Ok(Ok(mut clients)) = gio::spawn_blocking(crate::meeting_detection::clients).await
+            else {
+                return;
+            };
+            let Some(bound) = crate::meeting_detection::unique(&clients) else {
+                return;
+            };
+            loop {
+                let Some(r) = weak.upgrade() else { return };
+                if r.recording_generation.get() != generation
+                    || r.state.get() != State::Recording
+                    || !settings::auto_detect_title()
+                {
+                    return;
+                }
+                if let Some(title) = crate::meeting_detection::recording_title(&bound, &clients) {
+                    r.apply_meeting_title(Some(&title));
+                }
+                drop(r);
+                glib::timeout_future_seconds(2).await;
+                // A failed query supplies no suggestion, retaining the last name.
+                clients = gio::spawn_blocking(crate::meeting_detection::clients)
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or_default();
+            }
+        });
     }
 
     fn start(self: &Rc<Self>) {
@@ -1909,6 +2106,7 @@ impl Recorder {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|_| "Meeting".to_owned());
             self.title_row.set_text(&title);
+            *self.suggested_title.borrow_mut() = Some(title);
         }
         self.paused.set(false);
         self.paused_secs.set(0);
@@ -1941,6 +2139,14 @@ impl Recorder {
         self.timer.set_label("00:00");
         self.compact_timer.set_label("00:00");
         self.set_state(State::Recording);
+        self.recording_generation
+            .set(self.recording_generation.get().wrapping_add(1));
+        if settings::auto_detect_title() {
+            self.follow_recording_title(self.recording_generation.get());
+        }
+        if settings::auto_stop() {
+            self.follow_meeting_end(self.recording_generation.get());
+        }
     }
 
     fn stop(self: &Rc<Self>) {
@@ -1980,10 +2186,10 @@ impl Recorder {
                 );
                 let audio = export_audio(&mic, &system, &audio_out, format);
                 let tracks = export_tracks(&mic, &system, &audio_out);
-                (audio, tracks)
+                (audio, tracks, crate::auto_record::enabled())
             })
             .await
-            .unwrap_or((false, false));
+            .unwrap_or((false, false, false));
             let manifest = Manifest {
                 title: this.title(),
                 started_at: this.started_at.get(),
@@ -2001,15 +2207,30 @@ impl Recorder {
                 chapters: Vec::new(),
                 chapters_by: None,
             };
+            let skip_transcription =
+                crate::auto_record::skip_short_transcription(saved.2, manifest.duration_secs);
             let _ = meeting::write(&out, &manifest);
             *this.manifest.borrow_mut() = Some(manifest);
             *this.result_dir.borrow_mut() = Some(out);
 
+            if skip_transcription {
+                if saved.0 && saved.1 {
+                    let _ = std::fs::remove_dir_all(&staging);
+                }
+                this.animation_since.set(None);
+                this.animation.set_running(false);
+                this.finished_with_notice(
+                    saved.0,
+                    Ok(()),
+                    Some("Transcription skipped: recording was under one minute with auto-start enabled. You can transcribe it manually."),
+                );
+                return;
+            }
             let result = this
                 .run_transcription(Tracks::Raw(staging.clone()), language)
                 .await;
             // The kept tracks are enough to transcribe again; the raw files can go.
-            if saved == (true, true) {
+            if saved.0 && saved.1 {
                 let _ = std::fs::remove_dir_all(&staging);
             }
             this.hold_animation(&result).await;
@@ -2198,6 +2419,15 @@ impl Recorder {
     }
 
     fn finished(self: &Rc<Self>, audio_ok: bool, transcript: Result<(), String>) {
+        self.finished_with_notice(audio_ok, transcript, None);
+    }
+
+    fn finished_with_notice(
+        self: &Rc<Self>,
+        audio_ok: bool,
+        transcript: Result<(), String>,
+        notice: Option<&str>,
+    ) {
         self.done_title_row.set_text(&self.title_row.text());
         self.set_state(State::Done);
         // Follow a name that was edited while the transcription ran.
@@ -2219,12 +2449,20 @@ impl Recorder {
         if let Some(dir) = self.result_dir.borrow().as_ref() {
             self.player.load(dir);
         }
-        self.show_transcript(text.as_deref(), problem.as_deref());
+        self.show_transcript(text.as_deref(), problem.as_deref().or(notice));
+        if notice.is_some() && problem.is_none() {
+            self.done_icon.set_icon_name(Some("object-select-symbolic"));
+            self.window.set_default_widget(Some(&self.again_button));
+            self.again_button.grab_focus();
+        }
         self.transcript_scroll.vadjustment().set_value(0.0);
-        let actions_follow = problem.is_none() && !crate::actions::automatic().is_empty();
+        let actions_follow = problem.is_none()
+            && text.is_some()
+            && notice.is_none()
+            && !crate::actions::automatic().is_empty();
         if let Some(problem) = problem {
             eprintln!("{APP_NAME}: {problem}");
-        } else {
+        } else if text.is_some() {
             self.window.set_default_widget(Some(&self.copy_button));
             self.copy_button.grab_focus();
             // Your automatic actions run on a fresh transcript, after the
@@ -3142,7 +3380,7 @@ impl Recorder {
         let dialog = adw::AlertDialog::new(
             Some("Still recording"),
             Some(
-                "Closing stops the meeting. The audio is saved and transcribed first, then the window closes.",
+                "Closing stops the meeting and saves the audio before closing this window. Transcription is skipped for recordings under one minute when auto-start is enabled.",
             ),
         );
         dialog.add_response("keep", "Keep recording");

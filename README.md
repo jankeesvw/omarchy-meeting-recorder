@@ -253,6 +253,36 @@ omarchy plugin enable jankeesvw.meeting-recorder --section right
 
 This also recovers a failed first-start “Add to Bar” attempt in version 1.0.2, which leaves the widget linked but does not offer again on restart.
 
+## Meeting title detection
+
+In **Preferences** (gear button or **Ctrl+,**), enable **Detect meeting title** to suggest the name of an open Zoom or Google Meet meeting. This is off by default and never starts a recording. A name you type takes precedence. During recording, an automatic name can update when the same meeting exposes its topic after joining; disappearing titles or different meetings do not clear or replace it. If multiple meeting windows are detected, no name is guessed.
+
+Detection reads Hyprland window metadata. Supported hints include dedicated Chromium Zoom web apps, native Zoom meeting windows, dedicated Google Meet web apps, and Google Meet tabs whose browser window title identifies Meet. Only the selected tab of each browser window is visible to Hyprland; hidden tabs cannot be inspected. Known home, join, waiting-room and ended titles are filtered, but a titled preview can still look like a meeting.
+
+Some providers expose only a generic title (such as "Zoom meeting on web") or a meeting code. Those identify the provider but do not supply a meeting name; the recorder keeps your manual name or its usual timestamp default until a topic becomes available. No calendar or browser account access is used.
+
+Run `omarchy-meeting-recorder detect-meetings` to inspect the detected providers and available titles without recording.
+
+## Automatic recording
+
+**Preferences → Start recording automatically** enables a background watcher for Zoom and Google Meet. This switch is off by default and independent of **Detect meeting title**. With title detection off, recordings use your manual name or the normal timestamp default. With it on, an available meeting name is suggested without overriding a name you typed.
+
+With auto-start enabled, stopping a recording with less than 60 seconds of captured audio saves the audio but skips automatic transcription and chapter generation. Paused time does not count. This applies to manual starts too while the setting is enabled; recordings of exactly one minute or longer transcribe normally. You can transcribe a saved short recording manually from the done page. With auto-start disabled, short recordings transcribe normally.
+
+The watcher waits for one unambiguous meeting window in two consecutive checks. It opens the recorder if needed and leaves a busy recorder alone. Known home/join/ended screens are filtered, but detection is based on window metadata, not an authoritative joined-call signal: a titled preview can trigger recording. The selected Google Meet tab must be visible in a browser window; hidden tabs cannot be detected.
+
+Automatic stopping is a separate, default-off Preferences switch. It associates each new recording (manual or automatic) with the single detected meeting window and stops through the normal save/transcription flow after that window has been closed or shown a recognized ended state for 30 seconds. A reappearing window cancels the countdown. Tab switches, ambiguous meetings at recording start, and failed window queries do not trigger stopping. Turning the switch off cancels monitoring for the current recording; enabling it applies to subsequent recordings. This association lives in the recorder, so restarting the background auto-start watcher does not lose it. Recovered recordings are not automatically associated.
+
+**Google Meet limitation:** clicking Leave can retain the same title, and closing a tab inside a still-open browser is indistinguishable from switching tabs. In these cases, close the meeting window or stop manually. The grace period protects brief window disappearances; a reconnection that creates a different window is not identifiable as the same session. Native Zoom returning to its recognized home title can signal an end, but title formats vary. Live provider testing remains necessary.
+
+A handled meeting stays suppressed for as long as its window remains open. Manual Stop, closing the recorder, switching browser tabs, and restarting the watcher do not restart the same call, regardless of its length. There is no two-hour expiry. Closing the **meeting window** releases its suppression; a different Meet code or name can also trigger another recording. A busy recorder is left uninterrupted, and a skipped meeting is not retried automatically. You can still start recording manually.
+
+When available, a Google Meet code or numeric Zoom meeting ID distinguishes rooms with identical names. Dedicated web-app launch metadata can supply this ID; it may become stale if the app navigates to another room. A visible Meet code takes precedence. A title change is a new identity when no code is visible. Recurring meetings that reuse the same room ID and window remain suppressed: close and reopen the meeting window between calls, or start recording manually. Without an exposed ID, same-name rooms in the same window remain indistinguishable. Old two-hour suppression records migrate to window-lifetime suppression, including expired records for windows that are still open. A definite launcher failure, before any recording command is sent, is retried after 30 seconds. The watcher uses the installed executable path even if its running binary was replaced by an update.
+
+The switch creates `omarchy-meeting-recorder-auto-record.service` in your user systemd configuration, using the current executable. It starts with the graphical session and runs independently of the recorder GUI. Turning it off stops detection without interrupting a recording. If a source-built executable moves, toggle the switch off and on from the new location.
+
+Use `omarchy-meeting-recorder auto-record --check` for read-only diagnostics and `journalctl --user -u omarchy-meeting-recorder-auto-record.service` for watcher errors.
+
 ## Command line
 
 | Command | What it does |

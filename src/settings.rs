@@ -84,3 +84,20 @@ pub fn bar_widget_offered() -> bool {
 pub fn set_bar_widget_offered() {
     save("bar_widget_offered", "yes");
 }
+
+/// Opt-in title suggestions, independent of recording automation.
+pub fn auto_detect_title() -> bool {
+    load()["auto_detect_title"].as_str() == Some("yes")
+}
+
+pub fn set_auto_detect_title(enabled: bool) {
+    save("auto_detect_title", if enabled { "yes" } else { "no" });
+}
+
+/// Stop only on conservative meeting-end hints; default off.
+pub fn auto_stop() -> bool {
+    load()["auto_stop"].as_str() == Some("yes")
+}
+pub fn set_auto_stop(enabled: bool) {
+    save("auto_stop", if enabled { "yes" } else { "no" });
+}

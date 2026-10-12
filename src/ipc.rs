@@ -84,6 +84,24 @@ pub const COMMANDS: [&str; 5] = ["start", "stop", "compact", "pause", "new-windo
 /// A command from a client, and the name that came with `start` ("" without).
 pub type Command = (&'static str, String);
 
+/// Read one status snapshot without waiting indefinitely for the GUI.
+pub fn snapshot() -> Result<serde_json::Value, String> {
+    let stream = UnixStream::connect(socket_path()).map_err(|e| e.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    BufReader::new(stream)
+        .take(MAX_LINE as u64)
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
+    serde_json::from_str(&line).map_err(|e| e.to_string())
+}
+
+pub fn auto_start(title: Option<&str>) -> bool {
+    send(&serde_json::json!({"command": "auto-start", "title": title}).to_string())
+}
+
 /// Starts the socket server. Called once, from the primary instance. Clients
 /// get the state lines of the busiest window; a line a client writes that
 /// names one of `COMMANDS` is passed on to `commands`.
@@ -170,6 +188,7 @@ fn read_commands(stream: UnixStream, commands: &async_channel::Sender<Command>) 
         line.clear();
         match reader.by_ref().take(MAX_LINE as u64).read_line(&mut line) {
             Ok(0) | Err(_) => return,
+            Ok(_) if !line.ends_with('\n') => return,
             Ok(_) => {
                 if let Some(command) = parse_command(&line) {
                     let _ = commands.send_blocking(command);
@@ -181,6 +200,20 @@ fn read_commands(stream: UnixStream, commands: &async_channel::Sender<Command>) 
 
 fn parse_command(line: &str) -> Option<Command> {
     let line = line.trim();
+    if line.starts_with('{') {
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        if value["command"].as_str()? != "auto-start" {
+            return None;
+        }
+        if value["title"].is_null() {
+            return Some(("auto-start", String::new()));
+        }
+        let title = value["title"].as_str()?.trim();
+        if title.is_empty() || title.chars().count() > 200 || title.chars().any(char::is_control) {
+            return None;
+        }
+        return Some(("auto-start", title.to_owned()));
+    }
     let (name, title) = match line.split_once(' ') {
         Some(("start", title)) => ("start", title.trim()),
         _ => (line, ""),
@@ -300,5 +333,42 @@ mod tests {
             .unwrap()
             .push(status("recording", "Standup"));
         assert_eq!(busiest(&statuses).title, "Standup");
+    }
+    #[test]
+    fn legacy_commands_still_work() {
+        assert_eq!(parse_command("start\n"), Some(("start", String::new())));
+        assert_eq!(parse_command("stop"), Some(("stop", String::new())));
+        assert_eq!(parse_command("pause"), Some(("pause", String::new())));
+        assert_eq!(parse_command("compact"), Some(("compact", String::new())));
+    }
+
+    #[test]
+    fn auto_start_preserves_unicode_and_quotes() {
+        let title = "Team’s \"weekly\" meeting";
+        let line = serde_json::json!({"command":"auto-start", "title":title}).to_string();
+        assert_eq!(parse_command(&line), Some(("auto-start", title.into())));
+    }
+
+    #[test]
+    fn auto_start_can_leave_naming_to_the_app() {
+        assert_eq!(
+            parse_command(r#"{"command":"auto-start","title":null}"#),
+            Some(("auto-start", String::new()))
+        );
+    }
+
+    #[test]
+    fn invalid_commands_and_titles_are_rejected() {
+        for line in ["unknown", "{}", r#"{"command":"stop","title":"meeting"}"#] {
+            assert_eq!(parse_command(line), None);
+        }
+        for title in [String::new(), " ".into(), "x".repeat(201), "a\nb".into()] {
+            assert_eq!(
+                parse_command(
+                    &serde_json::json!({"command":"auto-start", "title":title}).to_string()
+                ),
+                None
+            );
+        }
     }
 }
