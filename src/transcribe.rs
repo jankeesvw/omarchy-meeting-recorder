@@ -26,7 +26,7 @@ use crate::audio::{CHANNELS, RATE};
 pub const WHISPER_RATE: usize = 16_000;
 
 /// (code, label) in the order of the dropdown. "auto" lets whisper detect it.
-pub const LANGUAGES: [(&str, &str); 8] = [
+pub const LANGUAGES: [(&str, &str); 9] = [
     ("auto", "Auto-detect"),
     ("en", "English"),
     ("nl", "Dutch"),
@@ -35,6 +35,7 @@ pub const LANGUAGES: [(&str, &str); 8] = [
     ("es", "Spanish"),
     ("it", "Italian"),
     ("pt", "Portuguese"),
+    ("th", "Thai"),
 ];
 
 /// What the transcription reports while it runs.
