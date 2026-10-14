@@ -15,6 +15,7 @@ mod ipc;
 mod meeting;
 mod models;
 mod nemotron;
+mod openrouter;
 mod player;
 mod settings;
 mod notes;
@@ -187,6 +188,10 @@ fn main() -> glib::ExitCode {
                 "  wait          wait until the recording is done and print its folder (--audio: once the audio is saved)"
             );
             println!("  transcribe    transcribe two tracks and print the transcript as Markdown");
+            println!("  transcribe-file  transcribe one audio file [--speakers N]");
+            println!(
+                "                Both accept --backend whisper|openrouter and --language auto|en|no|..."
+            );
             println!(
                 "  ask           run a prompt over stdin through the default agent, without tools"
             );

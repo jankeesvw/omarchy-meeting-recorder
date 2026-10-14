@@ -888,6 +888,7 @@ dependencies = [
  "ort",
  "realfft",
  "serde_json",
+ "toml",
  "ureq",
  "whisper-rs",
 ]

@@ -36,7 +36,7 @@ pub struct Manifest {
     pub imported: Option<String>,
     /// How many speakers were asked for on import; None means automatic.
     pub speaker_count: Option<usize>,
-    /// The whisper model the transcript was made with.
+    /// The transcription model the transcript was made with.
     pub model: Option<String>,
     /// Chapters made by an agent, empty when there are none.
     pub chapters: Vec<Chapter>,
