@@ -247,6 +247,7 @@ pub fn run(open: Option<&str>) -> glib::ExitCode {
             }
         });
         app.set_accels_for_action("win.compact", &["<Control>m"]);
+        app.set_accels_for_action("win.find", &["<Control>f"]);
         app.set_accels_for_action("window.close", &["<Control>w"]);
         app.set_accels_for_action("app.quit", &["<Control>q"]);
         app.set_accels_for_action("app.new-window", &["<Control>n"]);
@@ -327,6 +328,21 @@ struct Recorder {
     done_meta: gtk::Label,
     transcript_list: gtk::ListBox,
     transcript_scroll: gtk::ScrolledWindow,
+    find_button: gtk::Button,
+    find_bar: gtk::Box,
+    find_entry: gtk::SearchEntry,
+    find_count: gtk::Label,
+    find_prev: gtk::Button,
+    find_next: gtk::Button,
+    /// Text of each transcript row, in list order, for Ctrl+F.
+    search_rows: RefCell<Vec<String>>,
+    /// Row indexes of the current query.
+    find_hits: RefCell<Vec<i32>>,
+    /// The query those hits were computed for. Enter before the search
+    /// delay elapses still uses what is typed now.
+    find_query: RefCell<String>,
+    /// Which of `find_hits` is the one on screen.
+    find_at: Cell<usize>,
     player: Player,
     /// Start of each transcript line in ms, by buffer line, for seeking and highlighting.
     segments: RefCell<Vec<(i32, i64)>>,
@@ -404,6 +420,13 @@ impl Recorder {
             .action_name("win.compact")
             .build();
         header.pack_start(&compact_button);
+        let find_button = gtk::Button::builder()
+            .icon_name("system-search-symbolic")
+            .tooltip_text("Find in the transcript (Ctrl+F)")
+            .action_name("win.find")
+            .visible(false)
+            .build();
+        header.pack_end(&find_button);
         view.add_top_bar(&header);
         // Under the header bar, full width, while the speech model still has
         // to be downloaded.
@@ -664,6 +687,40 @@ impl Recorder {
             .css_classes(["card"])
             .build();
         transcript_scroll.set_overflow(gtk::Overflow::Hidden);
+        // Hidden until Ctrl+F on the done page. Sits above the transcript so
+        // the lines it marks stay visible underneath.
+        let find_entry = gtk::SearchEntry::builder()
+            .placeholder_text("Find in the transcript")
+            .activates_default(false)
+            .hexpand(true)
+            .build();
+        let find_count = gtk::Label::builder()
+            .width_chars(11)
+            .xalign(1.0)
+            .css_classes(["dim-label", "numeric"])
+            .build();
+        let find_nav = |icon: &str, tooltip: &str| {
+            gtk::Button::builder()
+                .icon_name(icon)
+                .tooltip_text(tooltip)
+                .sensitive(false)
+                .css_classes(["flat", "circular"])
+                .build()
+        };
+        let find_prev = find_nav("go-up-symbolic", "Previous match (Shift+Enter)");
+        let find_next = find_nav("go-down-symbolic", "Next match (Enter)");
+        let find_close = gtk::Button::builder()
+            .icon_name("window-close-symbolic")
+            .tooltip_text("Close (Escape)")
+            .css_classes(["flat", "circular"])
+            .build();
+        let find_bar = gtk::Box::builder().spacing(6).visible(false).build();
+        find_bar.append(&find_entry);
+        find_bar.append(&find_count);
+        find_bar.append(&find_prev);
+        find_bar.append(&find_next);
+        find_bar.append(&find_close);
+        right.append(&find_bar);
         right.append(&transcript_scroll);
 
         let done = gtk::Box::builder()
@@ -757,6 +814,8 @@ impl Recorder {
 
         let compact_action = gio::SimpleAction::new("compact", None);
         window.add_action(&compact_action);
+        let find_action = gio::SimpleAction::new("find", None);
+        window.add_action(&find_action);
         let run_action = gio::SimpleAction::new("run-action", Some(glib::VariantTy::INT32));
         window.add_action(&run_action);
 
@@ -792,6 +851,16 @@ impl Recorder {
             done_meta,
             transcript_list,
             transcript_scroll,
+            find_button,
+            find_bar,
+            find_entry,
+            find_count,
+            find_prev,
+            find_next,
+            search_rows: RefCell::default(),
+            find_hits: RefCell::default(),
+            find_query: RefCell::default(),
+            find_at: Cell::new(0),
             player,
             segments: RefCell::default(),
             lines: RefCell::default(),
@@ -832,8 +901,89 @@ impl Recorder {
             manifest: RefCell::default(),
         });
         recorder.connect_signals(&open_button, &new_button);
+        recorder.connect_find(&find_close);
         recorder.render();
         recorder
+    }
+
+    fn connect_find(self: &Rc<Self>, find_close: &gtk::Button) {
+        let weak = Rc::downgrade(self);
+        self.find_entry.connect_search_changed(move |_| {
+            if let Some(r) = weak.upgrade() {
+                r.apply_find(true);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.find_entry.connect_activate(move |_| {
+            if let Some(r) = weak.upgrade() {
+                r.find_again(1);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.find_entry.connect_next_match(move |_| {
+            if let Some(r) = weak.upgrade() {
+                r.find_again(1);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.find_entry.connect_previous_match(move |_| {
+            if let Some(r) = weak.upgrade() {
+                r.find_again(-1);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.find_entry.connect_stop_search(move |_| {
+            if let Some(r) = weak.upgrade() {
+                r.close_find();
+            }
+        });
+        // Shift+Enter is still Enter to the entry, which would move forward.
+        // Catch it on the way in and go back instead.
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak = Rc::downgrade(self);
+        keys.connect_key_pressed(move |_, key, _, modifiers| {
+            let enter = matches!(key, gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter);
+            if enter && modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
+                if let Some(r) = weak.upgrade() {
+                    r.find_again(-1);
+                }
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        self.find_entry.add_controller(keys);
+
+        let weak = Rc::downgrade(self);
+        self.find_prev.connect_clicked(move |_| {
+            if let Some(r) = weak.upgrade() {
+                r.find_again(-1);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.find_next.connect_clicked(move |_| {
+            if let Some(r) = weak.upgrade() {
+                r.find_again(1);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        find_close.connect_clicked(move |_| {
+            if let Some(r) = weak.upgrade() {
+                r.close_find();
+            }
+        });
+        if let Some(action) = self.window.lookup_action("find") {
+            let weak = Rc::downgrade(self);
+            action
+                .downcast::<gio::SimpleAction>()
+                .expect("find is a SimpleAction")
+                .connect_activate(move |_, _| {
+                    if let Some(r) = weak.upgrade() {
+                        r.open_find();
+                    }
+                });
+        }
     }
 
     fn connect_signals(self: &Rc<Self>, open_button: &gtk::Button, new_button: &gtk::Button) {
@@ -1368,6 +1518,10 @@ impl Recorder {
     }
 
     fn set_state(&self, state: State) {
+        // The bar lives on the done page. Leave it behind with the page.
+        if state != State::Done {
+            self.dismiss_find();
+        }
         self.state.set(state);
         let mut shared = self.shared.lock().unwrap();
         shared.state = if state == State::Recording && self.paused.get() {
@@ -1396,6 +1550,7 @@ impl Recorder {
         self.live.set(recording);
         self.dot.set_visible(recording);
         self.compact_button.set_visible(recording);
+        self.find_button.set_visible(state == State::Done);
         self.compact_action.set_enabled(recording);
         self.language_row
             .set_sensitive(!matches!(state, State::Stopping | State::Transcribing));
@@ -2391,8 +2546,11 @@ impl Recorder {
             .as_ref()
             .map(|m| m.chapters.clone())
             .unwrap_or_default();
+        // One string per row, in the same order as the list, so a hit is a row.
+        let mut search_rows = Vec::new();
         for note in &notes {
             self.transcript_list.append(&note_row(note));
+            search_rows.push(note.clone());
         }
         // The speaker column is as wide as the longest name.
         let speaker_width = paragraphs
@@ -2416,6 +2574,7 @@ impl Recorder {
                 let row = chapter_row(&chapter.title, chapter.start_ms);
                 segments.push((row_count(&self.transcript_list), chapter.start_ms));
                 self.transcript_list.append(&row);
+                search_rows.push(chapter.title.clone());
             }
             let index = order
                 .iter()
@@ -2424,6 +2583,7 @@ impl Recorder {
             let row = self.paragraph_row(&paragraph, index, time_width, speaker_width);
             segments.push((row_count(&self.transcript_list), paragraph.start_ms));
             self.transcript_list.append(&row);
+            search_rows.push(format!("{} {}", paragraph.speaker, paragraph.text));
             lines.push((paragraph.start_ms, paragraph.speaker, paragraph.text));
         }
         if let Some(manifest) = self.manifest.borrow().as_ref() {
@@ -2431,6 +2591,11 @@ impl Recorder {
         }
         *self.segments.borrow_mut() = segments;
         *self.lines.borrow_mut() = lines;
+        *self.search_rows.borrow_mut() = search_rows;
+        // An edit rebuilds the list. Keep the bar on the same line if it can.
+        if self.find_bar.is_visible() {
+            self.apply_find(false);
+        }
         self.player.set_chapters(
             chapters
                 .iter()
@@ -2901,6 +3066,142 @@ impl Recorder {
                 {
                     *line = format!("**[{time}] {other}:** {text}");
                 }
+            }
+        });
+    }
+
+    /// Ctrl+F on the done page: show the bar and select whatever was typed last.
+    fn open_find(&self) {
+        if self.state.get() != State::Done {
+            return;
+        }
+        let opening = !self.find_bar.is_visible();
+        self.find_bar.set_visible(true);
+        self.find_entry.grab_focus();
+        self.find_entry.select_region(0, -1);
+        if opening {
+            self.apply_find(false);
+        }
+    }
+
+    /// Hides the bar and the marks. The query stays, so the next Ctrl+F continues it.
+    fn close_find(&self) {
+        self.dismiss_find();
+        if self.state.get() == State::Done {
+            // Back to the copy button: focus in the name field would rename the meeting.
+            self.copy_button.grab_focus();
+        }
+    }
+
+    fn dismiss_find(&self) {
+        if !self.find_bar.is_visible() {
+            return;
+        }
+        self.find_bar.set_visible(false);
+        self.clear_find_marks();
+    }
+
+    /// Marks every row that contains the query. `jump_to_first` is for a new
+    /// query; a rebuilt transcript keeps the row it was on.
+    fn apply_find(&self, jump_to_first: bool) {
+        let keep = self.find_hits.borrow().get(self.find_at.get()).copied();
+        self.clear_find_marks();
+        let query = self.find_entry.text();
+        let hits = crate::find::hits(self.search_rows.borrow().as_slice(), query.as_str());
+        let count = hits.len();
+        let at = if count == 0 || jump_to_first {
+            0
+        } else if let Some(row) = keep {
+            hits.iter().position(|hit| *hit == row).unwrap_or(0)
+        } else {
+            0
+        };
+        for index in &hits {
+            if let Some(row) = self.transcript_list.row_at_index(*index) {
+                row.add_css_class("match");
+            }
+        }
+        *self.find_hits.borrow_mut() = hits;
+        *self.find_query.borrow_mut() = query.trim().to_owned();
+        self.find_at.set(at);
+        let any = count > 0;
+        self.find_prev.set_sensitive(any);
+        self.find_next.set_sensitive(any);
+        if query.trim().is_empty() {
+            self.find_count.set_label("");
+            return;
+        }
+        if count == 0 {
+            self.find_count.set_label("No matches");
+            return;
+        }
+        self.show_hit(at);
+    }
+
+    /// Next or previous match. A query that has not been applied yet jumps
+    /// to its first match instead of stepping past it.
+    fn find_again(&self, delta: i32) {
+        let query = self.find_entry.text();
+        if query.trim() != self.find_query.borrow().as_str() {
+            self.apply_find(true);
+            return;
+        }
+        self.find_step(delta);
+    }
+
+    /// Moves to another match. `delta` is 1 or -1, and wraps around.
+    fn find_step(&self, delta: i32) {
+        let count = self.find_hits.borrow().len() as i32;
+        if count == 0 {
+            return;
+        }
+        let at = (self.find_at.get() as i32 + delta).rem_euclid(count) as usize;
+        self.show_hit(at);
+    }
+
+    fn show_hit(&self, at: usize) {
+        let hits = self.find_hits.borrow().clone();
+        if let Some(row) = hits
+            .get(self.find_at.get())
+            .and_then(|index| self.transcript_list.row_at_index(*index))
+        {
+            row.remove_css_class("found");
+        }
+        self.find_at.set(at);
+        let Some(&index) = hits.get(at) else {
+            return;
+        };
+        self.find_count
+            .set_label(&format!("{} of {}", at + 1, hits.len()));
+        if let Some(row) = self.transcript_list.row_at_index(index) {
+            row.add_css_class("found");
+            self.scroll_row_into_view(&row);
+        }
+    }
+
+    fn clear_find_marks(&self) {
+        for index in self.find_hits.borrow().clone() {
+            if let Some(row) = self.transcript_list.row_at_index(index) {
+                row.remove_css_class("match");
+                row.remove_css_class("found");
+            }
+        }
+    }
+
+    /// Brings `row` into the transcript, a third of the way down, once it has a size.
+    fn scroll_row_into_view(&self, row: &gtk::ListBoxRow) {
+        let row = row.clone();
+        let list = self.transcript_list.clone();
+        let scroll = self.transcript_scroll.clone();
+        glib::idle_add_local_once(move || {
+            let Some(bounds) = row.compute_bounds(&list) else {
+                return;
+            };
+            let adjustment = scroll.vadjustment();
+            let (top, page) = (adjustment.value(), adjustment.page_size());
+            let (y, height) = (f64::from(bounds.y()), f64::from(bounds.height()));
+            if y < top || y + height > top + page {
+                adjustment.set_value((y - page * 0.3).max(0.0));
             }
         });
     }
@@ -3555,6 +3856,9 @@ fn load_css() {
          .transcript row { padding: 7px 10px; border-radius: 8px; }
          .transcript row:hover { background: alpha(currentColor, 0.06); }
          .transcript row.current { background: alpha(@accent_bg_color, 0.25); }
+         .transcript row.match { background: alpha(@accent_bg_color, 0.14); }
+         .transcript row.found { background: alpha(@accent_bg_color, 0.36);
+                                 box-shadow: inset 3px 0 0 @accent_color; }
          .transcript row.chapter { padding-top: 16px; }
          .transcript row.chapter:first-child { padding-top: 7px; }
          .chapter-heading { font-weight: 800; font-size: 1.08em; }

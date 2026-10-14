@@ -116,7 +116,7 @@ If the app quits while it records (a crash, a logout, a power cut), the next sta
 
 ## Handy to know
 
-- **Keyboard.** Ctrl+M switches between the full window and the compact strip. Ctrl+N opens another window. On the done page Enter copies the transcript. Ctrl+W closes the window and Ctrl+Q all of them, and they ask first while recording or transcribing.
+- **Keyboard.** Ctrl+M switches between the full window and the compact strip. Ctrl+N opens another window. On the done page Enter copies the transcript. Ctrl+F finds text in it: the match is marked, Enter and Shift+Enter move between matches, and Escape closes the bar. Ctrl+W closes the window and Ctrl+Q all of them, and they ask first while recording or transcribing.
 - **The name** stays editable all the time. After the transcript is done, changing it (Enter, or leaving the field) renames the meeting folder and the heading in the transcript.
 - **Closing** while recording or transcribing asks first. You can stop and close, let the transcription finish in the background and quit afterwards, or cancel the transcription; the audio is kept either way.
 - **Opening a meeting later.** Double-click its `.meeting-recorder` file, or run `omarchy-meeting-recorder <folder>`. It opens on the done page with the settings it was made with. When the window is busy recording or transcribing, the meeting opens in a window of its own.

@@ -10,6 +10,7 @@ mod bar_widget;
 mod chapters;
 mod diarize;
 mod export;
+mod find;
 mod ipc;
 mod meeting;
 mod models;
