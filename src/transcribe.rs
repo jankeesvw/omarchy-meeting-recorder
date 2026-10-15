@@ -698,6 +698,7 @@ pub fn transcribe(
             &language,
             (done, done + share),
             false,
+            RECORDING_TEXT_CTX,
             events,
             abort,
         )?;
@@ -995,6 +996,7 @@ fn whisper_pass(
         language,
         (0.0, 1.0),
         true,
+        0,
         events,
         abort,
     )?;
@@ -1044,13 +1046,15 @@ fn side_pass(
     language: &str,
     progress: (f64, f64),
     paragraphs: bool,
+    text_ctx: i32,
     events: &Events,
     abort: &Abort,
 ) -> Result<(Vec<Segment>, Option<String>), String> {
     let glued = Glued::new(track, regions);
     emit(events, Event::Stage("Transcribing".into()));
-    let (words, detected) =
-        run_whisper(context, &glued, speakers, language, progress, events, abort)?;
+    let (words, detected) = run_whisper(
+        context, &glued, speakers, language, progress, text_ctx, events, abort,
+    )?;
     Ok((
         phrases(&words, &glued, speakers, track, paragraphs),
         detected,
@@ -1068,12 +1072,23 @@ struct Word {
     segment: usize,
 }
 
+/// How much earlier text conditions each 30 s window of a recording's side
+/// (whisper.cpp's `n_max_text_ctx`). With all of it (the default), one made-up
+/// line on a quiet mic repeats for the rest of the meeting (issue #20); with
+/// none, short turns lose their thread (AMI ES2004a as a call: 98.3% of words
+/// on the right side with all of it, 98.1% with 64 tokens, 96.4% with none).
+/// An imported file gets none: on FLEURS, all of it let 36 of 647 sentences
+/// repeat the window before, none gave no loops.
+const RECORDING_TEXT_CTX: i32 = 64;
+
+#[allow(clippy::too_many_arguments)]
 fn run_whisper(
     context: &WhisperContext,
     glued: &Glued,
     speakers: &Speakers,
     language: &str,
     progress: (f64, f64),
+    text_ctx: i32,
     events: &Events,
     abort: &Abort,
 ) -> Result<(Vec<Word>, Option<String>), String> {
@@ -1089,6 +1104,9 @@ fn run_whisper(
     params.set_suppress_blank(true);
     params.set_suppress_nst(true);
     params.set_no_speech_thold(0.6);
+    // `no_context` only clears the text between `full` calls; this bounds it
+    // within one.
+    params.set_n_max_text_ctx(text_ctx);
     // Word times, so a segment can be split where the speaker changes.
     params.set_token_timestamps(true);
     params.set_split_on_word(true);
@@ -1341,6 +1359,11 @@ fn phrases(
         if level < 0.004 || piece.no_speech > 0.85 {
             return true; // whisper talking over silence
         }
+        // A subtitle credit is never meeting speech, however loud the noise
+        // under it ("Untertitelung des ZDF, 2020", issue #20).
+        if is_subtitle_credit(text) {
+            return true;
+        }
         // The things whisper says when it hears nothing, from its subtitle diet.
         whole && is_stock_phrase(text) && (piece.no_speech > 0.3 || level < 0.02)
     }
@@ -1391,6 +1414,42 @@ fn is_stock_phrase(text: &str) -> bool {
         .collect();
     let normalized = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
     STOCK.contains(&normalized.as_str()) || normalized.starts_with("subtitles by")
+}
+
+/// The credit line of the subtitles whisper learned from ("Subtitles by …",
+/// "Untertitelung des ZDF, 2020", "Sous-titres …"), never said in a meeting.
+/// Short lines only, so a real sentence that mentions subtitles stays.
+fn is_subtitle_credit(text: &str) -> bool {
+    const CREDITS: &[&str] = &[
+        "subtitles by",
+        "subtitled by",
+        "captions by",
+        "ondertiteling",
+        "ondertiteld door",
+        "untertitel",
+        "untertitelung",
+        "sous titres",
+        "sous titrage",
+        "soustitres",
+        "soustitrage",
+        "sottotitoli",
+        "subtitulos",
+        "subtítulos",
+        "legendas",
+        "υπότιτλοι",
+        "titulky",
+    ];
+    let normalized: String = text
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect();
+    let words: Vec<&str> = normalized.split_whitespace().collect();
+    let normalized = words.join(" ");
+    words.len() <= 8
+        && CREDITS
+            .iter()
+            .any(|c| normalized == *c || normalized.starts_with(&format!("{c} ")))
 }
 
 /// "[BLANK_AUDIO]", "(music)", "*applause*" and friends.
@@ -1576,6 +1635,25 @@ fn usage() -> glib::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subtitle_credits_are_never_speech() {
+        assert!(is_subtitle_credit("Untertitelung des ZDF, 2020"));
+        assert!(is_subtitle_credit("Untertitel im Auftrag des ZDF, 2021"));
+        assert!(is_subtitle_credit("Subtitles by the Amara.org community"));
+        assert!(is_subtitle_credit("Sous-titrage Société Radio-Canada"));
+        assert!(is_subtitle_credit(
+            "Ondertiteling door de Nederlandse Publieke Omroep"
+        ));
+        assert!(is_subtitle_credit("Υπότιτλοι AUTHORWAVE"));
+        assert!(is_subtitle_credit("Titulky vytvořil JohnyX"));
+        assert!(!is_subtitle_credit(
+            "Die Untertitelung machen wir morgen fertig."
+        ));
+        assert!(!is_subtitle_credit(
+            "The subtitles by the way are ready for the whole presentation since yesterday."
+        ));
+    }
 
     fn line(start_ms: i64, speaker: &str, text: &str) -> Segment {
         Segment {

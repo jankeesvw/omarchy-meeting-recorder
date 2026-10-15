@@ -16,7 +16,8 @@ Columns: found = words of the script that are in the transcript; side = of
 those, on the right side of the call (you or the other side); person = with
 the right person; leaked = lines of yours that are really the other side
 leaking into your mic; invented = lines of yours with hardly a word anyone
-said then (made up from noise); speakers = voices told apart / voices in the case;
+said then (made up from noise); repeated = sentences of three words or more
+that say the previous one again (whisper looping on its own text, #20); speakers = voices told apart / voices in the case;
 speaker error = share of speech given to the wrong speaker by `diarize`.
 For AMI there is no script, so side and person come from who spoke when.
 Only Python's standard library is needed, plus ffmpeg for AMI.
@@ -126,6 +127,15 @@ def score_text(markdown, truth):
             invented += 1
     return {"found": found / total, "side": side / total, "person": right / total, "leaked": leaked, "invented": invented,
             "speakers": f"{len(votes)}/{len(names)}"}
+
+
+def score_repeats(markdown):
+    """Sentences of three words or more that repeat the one before: whisper
+    looping on its own earlier text ("And we've got 25 minutes to do that."
+    a dozen times over), which people hardly ever do."""
+    sentences = [words(s) for m in LINE.finditer(markdown) for s in re.split(r"[.?!]+", m[5])]
+    sentences = [s for s in sentences if s]
+    return {"repeated": sum(1 for a, b in zip(sentences, sentences[1:]) if len(b) >= 3 and a == b)}
 
 
 def score_timing(markdown, truth):
@@ -308,13 +318,14 @@ def main():
             if args.keep:
                 Path(args.keep, f"{name}.md").write_text(md)
             scored.update(score_text(md, case["truth"]) if text or not case["truth"] else score_timing(md, case["truth"]))
+            scored.update(score_repeats(md))
             if case["kind"] == "import":
                 scored.pop("side", None)
         except Exception as e:  # a failing case is a result too
             scored["error"] = str(e)
         results[name] = scored
 
-    columns = ["found", "side", "person", "leaked", "invented", "lines", "speakers", "speaker error", "seconds"]
+    columns = ["found", "side", "person", "leaked", "invented", "repeated", "lines", "speakers", "speaker error", "seconds"]
     shown = [c for c in columns if any(c in r for r in results.values())]
     width = max(len(n) for n in results) + 2
     print("case".ljust(width) + "".join(c.rjust(15) for c in shown))
