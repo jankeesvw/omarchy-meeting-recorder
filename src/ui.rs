@@ -14,7 +14,7 @@ use gtk::{gio, glib};
 
 use crate::agent::{self, Agent};
 use crate::animation::TranscribeAnimation;
-use crate::audio::{HISTORY, Source, to_meter};
+use crate::audio::{self, HISTORY, Source, to_meter};
 use crate::chapters::{self, Chapter};
 use crate::export::{self, Format, export_audio, export_tracks};
 use crate::ipc::{self, SharedStatus, Status};
@@ -92,8 +92,8 @@ struct Hub {
 impl Hub {
     fn new(app: &adw::Application) -> Rc<Self> {
         let hub = Rc::new(Hub {
-            mic: Source::spawn("@DEFAULT_SOURCE@"),
-            system: Source::spawn("@DEFAULT_MONITOR@"),
+            mic: Source::spawn(audio::to_record(&settings::load_mic_device(), false)),
+            system: Source::spawn(audio::to_record(&settings::load_system_device(), true)),
             statuses: ipc::Statuses::default(),
             windows: RefCell::default(),
         });
@@ -315,6 +315,47 @@ pub fn run(open: Option<&str>) -> glib::ExitCode {
         Some(path) => app.run_with_args(&[APP_NAME, path]),
         None => app.run_with_args::<&str>(&[]),
     }
+}
+
+/// The microphone, or with `outputs` the output whose sound is recorded:
+/// "System default" and the devices there are now. A choice is remembered and
+/// switches `source` at once, in the middle of a recording too.
+fn device_row(source: &Source, outputs: bool) -> adw::ComboRow {
+    let (title, subtitle, saved, save): (_, _, _, fn(&str)) = if outputs {
+        (
+            "Computer audio",
+            "The output you hear the call on",
+            settings::load_system_device(),
+            settings::save_system_device,
+        )
+    } else {
+        (
+            "Microphone",
+            "What you speak into",
+            settings::load_mic_device(),
+            settings::save_mic_device,
+        )
+    };
+    let devices = audio::devices(outputs);
+    let mut labels = vec!["System default"];
+    labels.extend(devices.iter().map(|device| device.label.as_str()));
+    let row = adw::ComboRow::builder()
+        .title(title)
+        .subtitle(subtitle)
+        .model(&gtk::StringList::new(&labels))
+        .build();
+    let selected = devices.iter().position(|device| device.name == saved);
+    row.set_selected(selected.map_or(0, |i| i as u32 + 1));
+    let source = source.clone();
+    row.connect_selected_notify(move |row| {
+        let name = (row.selected() as usize)
+            .checked_sub(1)
+            .and_then(|i| devices.get(i))
+            .map_or("", |device| device.name.as_str());
+        save(name);
+        source.set_device(&audio::to_record(name, outputs));
+    });
+    row
 }
 
 struct Recorder {
@@ -549,6 +590,8 @@ impl Recorder {
             }
         });
         group.add(&title_row);
+        group.add(&device_row(&mic, false));
+        group.add(&device_row(&system, true));
         group.add(&format_row);
         group.add(&language_row);
         group.add(&webcam_row);

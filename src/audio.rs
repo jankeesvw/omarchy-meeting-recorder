@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -26,6 +26,10 @@ struct Inner {
     recording: Option<Recording>,
     /// While paused the meters keep running but nothing is written.
     paused: bool,
+    /// The PulseAudio source `parec` records, such as `@DEFAULT_MONITOR@`.
+    device: String,
+    /// The running `parec`, so a switch to another device does not wait for its next chunk.
+    child: Option<Child>,
 }
 
 struct Recording {
@@ -41,21 +45,40 @@ pub struct Source {
 
 impl Source {
     /// Starts capturing `device`, a PulseAudio source name such as `@DEFAULT_MONITOR@`.
-    pub fn spawn(device: &'static str) -> Self {
+    pub fn spawn(device: String) -> Self {
         let inner = Arc::new(Mutex::new(Inner {
             levels: VecDeque::from(vec![0.0; HISTORY]),
             recording: None,
             paused: false,
+            device,
+            child: None,
         }));
         let shared = inner.clone();
         thread::spawn(move || {
             loop {
-                capture(device, &shared);
-                // parec exits when the device goes away; try again.
-                thread::sleep(Duration::from_secs(1));
+                let device = shared.lock().unwrap().device.clone();
+                capture(&device, &shared);
+                // parec exits when the device goes away; try again. A switch
+                // to another device starts the new one at once.
+                if shared.lock().unwrap().device == device {
+                    thread::sleep(Duration::from_secs(1));
+                }
             }
         });
         Source { inner }
+    }
+
+    /// Records `device` from now on, also in the middle of a recording: the
+    /// moment between the two is filled with silence, like any other gap.
+    pub fn set_device(&self, device: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.device == device {
+            return;
+        }
+        inner.device = device.to_owned();
+        if let Some(child) = inner.child.as_mut() {
+            let _ = child.kill();
+        }
     }
 
     /// Tees the raw stream (s16le, RATE, CHANNELS) into `path` from now on.
@@ -119,6 +142,7 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
         return;
     };
     let mut stdout = child.stdout.take().expect("piped stdout");
+    shared.lock().unwrap().child = Some(child);
     let mut buf = vec![0u8; CHUNK_BYTES];
     // So a crash loses at most a second: flush every second, and push it to
     // the disk itself every half minute in case the machine goes down too.
@@ -140,6 +164,9 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
             / 32768.0;
         let mut guard = shared.lock().unwrap();
         let inner = &mut *guard;
+        if inner.device != device {
+            break;
+        }
         inner.levels.pop_front();
         inner.levels.push_back(peak);
         if let Some(Recording { file, timeline }) = inner.recording.as_mut() {
@@ -159,8 +186,65 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
             }
         }
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    if let Some(mut child) = shared.lock().unwrap().child.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// A PulseAudio source to record: `name` for `parec -d`, `label` for the menu.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Device {
+    pub name: String,
+    pub label: String,
+}
+
+/// The microphones, or with `outputs` the monitors of the outputs (what you
+/// hear), as `pactl` lists them now. Empty when `pactl` is missing or fails.
+pub fn devices(outputs: bool) -> Vec<Device> {
+    Command::new("pactl")
+        .args(["--format=json", "list", "sources"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| parse_devices(&String::from_utf8_lossy(&out.stdout), outputs))
+        .unwrap_or_default()
+}
+
+/// What `parec` records for `saved`, a device name from `devices`: the
+/// default microphone or output when it is "" or no longer there.
+pub fn to_record(saved: &str, outputs: bool) -> String {
+    if devices(outputs).iter().any(|device| device.name == saved) {
+        saved.to_owned()
+    } else if outputs {
+        "@DEFAULT_MONITOR@".to_owned()
+    } else {
+        "@DEFAULT_SOURCE@".to_owned()
+    }
+}
+
+/// A monitor has `monitor_source` set to its output's name; a microphone has it empty.
+fn parse_devices(json: &str, outputs: bool) -> Vec<Device> {
+    let Ok(serde_json::Value::Array(sources)) = serde_json::from_str(json) else {
+        return Vec::new();
+    };
+    sources
+        .iter()
+        .filter_map(|source| {
+            let name = source["name"].as_str()?;
+            let monitor = !source["monitor_source"].as_str().unwrap_or_default().is_empty();
+            if monitor != outputs {
+                return None;
+            }
+            let description = source["description"].as_str().unwrap_or(name);
+            let label = description.strip_prefix("Monitor of ").unwrap_or(description);
+            Some(Device {
+                name: name.to_owned(),
+                label: label.to_owned(),
+            })
+        })
+        .collect()
 }
 
 /// Where a recording is: how much audio it should hold by now, against how
@@ -337,6 +421,28 @@ mod tests {
             write(&mut timeline, t + ms(3_020), ms(8_000), false),
             frames_in(ms(3_000))
         );
+    }
+
+    #[test]
+    fn devices_split_microphones_from_outputs() {
+        let json = r#"[
+            {"name": "speaker.monitor", "description": "Monitor of Speaker", "monitor_source": "speaker"},
+            {"name": "usb.mic", "description": "USB Mic", "monitor_source": ""},
+            {"name": "bare.mic"}
+        ]"#;
+        let device = |name: &str, label: &str| Device {
+            name: name.to_owned(),
+            label: label.to_owned(),
+        };
+        assert_eq!(
+            parse_devices(json, true),
+            [device("speaker.monitor", "Speaker")]
+        );
+        assert_eq!(
+            parse_devices(json, false),
+            [device("usb.mic", "USB Mic"), device("bare.mic", "bare.mic")]
+        );
+        assert!(parse_devices("not json", true).is_empty());
     }
 
     #[test]
