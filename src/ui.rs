@@ -28,11 +28,11 @@ const MIC_COLOR: (f64, f64, f64) = (0.21, 0.52, 0.89);
 const SYSTEM_COLOR: (f64, f64, f64) = (0.90, 0.38, 0.0);
 const FULL_SIZE: (i32, i32) = (480, 700);
 const COMPACT_SIZE: (i32, i32) = (300, 84);
-const DONE_SIZE: (i32, i32) = (1100, 760);
+const DONE_SIZE: (i32, i32) = (1340, 760);
 /// The recording page with the notes next to it: wider, just as high.
 const NOTES_SIZE: (i32, i32) = (1100, FULL_SIZE.1);
 /// The done page with the meeting's notes next to the transcript.
-const DONE_NOTES_SIZE: (i32, i32) = (1560, DONE_SIZE.1);
+const DONE_NOTES_SIZE: (i32, i32) = (1800, DONE_SIZE.1);
 /// How wide the notes are next to the transcript.
 const DONE_NOTES_WIDTH: i32 = 520;
 
@@ -376,6 +376,10 @@ struct Recorder {
     find_query: RefCell<String>,
     /// Which of `find_hits` is the one on screen.
     find_at: Cell<usize>,
+    /// Every saved meeting, newest first, on the done page.
+    meetings_list: gtk::ListBox,
+    /// Folder of each row in `meetings_list`.
+    meeting_dirs: RefCell<Vec<PathBuf>>,
     player: Player,
     /// Start of each transcript line in ms, by buffer line, for seeking and highlighting.
     segments: RefCell<Vec<(i32, i64)>>,
@@ -812,6 +816,41 @@ impl Recorder {
         pip.add_css_class("webcam-pip");
         transcript_layers.add_overlay(pip);
 
+        // Every saved meeting, so a transcript can be opened without the file manager.
+        let meetings_list = gtk::ListBox::builder()
+            .css_classes(["navigation-sidebar"])
+            .selection_mode(gtk::SelectionMode::Single)
+            .activate_on_single_click(true)
+            .build();
+        meetings_list.set_placeholder(Some(
+            &gtk::Label::builder()
+                .label("No meetings yet")
+                .css_classes(["dim-label"])
+                .margin_top(14)
+                .margin_bottom(14)
+                .build(),
+        ));
+        let meetings_scroll = gtk::ScrolledWindow::builder()
+            .child(&meetings_list)
+            .vexpand(true)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .build();
+        let meetings_side = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(6)
+            .width_request(220)
+            .hexpand(false)
+            .build();
+        meetings_side.append(
+            &gtk::Label::builder()
+                .label("Meetings")
+                .xalign(0.0)
+                .margin_start(12)
+                .css_classes(["heading"])
+                .build(),
+        );
+        meetings_side.append(&meetings_scroll);
+
         let done = gtk::Box::builder()
             .spacing(24)
             .margin_top(12)
@@ -819,7 +858,7 @@ impl Recorder {
             .margin_start(24)
             .margin_end(24)
             .build();
-        // A fixed, narrow column on the left; the transcript takes the rest.
+        // Meetings, then the open meeting, then the transcript.
         let left_column = adw::Clamp::builder()
             .child(&left)
             .maximum_size(320)
@@ -827,6 +866,7 @@ impl Recorder {
             .width_request(320)
             .hexpand(false)
             .build();
+        done.append(&meetings_side);
         done.append(&left_column);
         done.append(&right);
 
@@ -965,6 +1005,8 @@ impl Recorder {
             find_hits: RefCell::default(),
             find_query: RefCell::default(),
             find_at: Cell::new(0),
+            meetings_list,
+            meeting_dirs: RefCell::default(),
             player,
             segments: RefCell::default(),
             lines: RefCell::default(),
@@ -1095,6 +1137,22 @@ impl Recorder {
     }
 
     fn connect_signals(self: &Rc<Self>, open_button: &gtk::Button, new_button: &gtk::Button) {
+        let weak = Rc::downgrade(self);
+        self.meetings_list.connect_row_activated(move |_, row| {
+            let Some(r) = weak.upgrade() else {
+                return;
+            };
+            let dir = r.meeting_dirs.borrow().get(row.index() as usize).cloned();
+            let Some(dir) = dir else {
+                return;
+            };
+            // The selected row is the meeting already on screen.
+            if r.result_dir.borrow().as_deref() == Some(dir.as_path()) {
+                return;
+            }
+            r.open_meeting(&dir);
+        });
+
         let weak = Rc::downgrade(self);
         self.notes.close_button.connect_clicked(move |_| {
             let Some(r) = weak.upgrade() else { return };
@@ -1924,9 +1982,9 @@ impl Recorder {
             return;
         }
         let minimum = if size == DONE_SIZE {
-            (820, 560)
+            (1040, 560)
         } else if size == DONE_NOTES_SIZE {
-            (820 + DONE_NOTES_WIDTH, 560)
+            (1040 + DONE_NOTES_WIDTH, 560)
         } else if size == NOTES_SIZE {
             (900, 600)
         } else {
@@ -2748,6 +2806,7 @@ impl Recorder {
             self.player.load(dir);
         }
         self.show_transcript(text.as_deref(), problem.as_deref());
+        self.fill_meetings();
         self.transcript_scroll.vadjustment().set_value(0.0);
         let actions_follow = problem.is_none() && !crate::actions::automatic().is_empty();
         if let Some(problem) = problem {
@@ -2854,6 +2913,7 @@ impl Recorder {
             .then_some("This meeting has no transcript yet.");
         self.player.load(&dir);
         self.show_transcript(text.as_deref(), problem);
+        self.fill_meetings();
         self.transcript_scroll.vadjustment().set_value(0.0);
         // Never leave the focus in the name: typing would rename the meeting.
         self.window.set_default_widget(Some(&self.copy_button));
@@ -2981,6 +3041,26 @@ impl Recorder {
         let meta = meta.join("  ·  ");
         self.done_meta.set_label(&meta);
         self.done_meta.set_visible(!meta.is_empty());
+    }
+
+    /// Fills the meetings list from disk, newest first, and selects the open one.
+    fn fill_meetings(&self) {
+        while let Some(row) = self.meetings_list.row_at_index(0) {
+            self.meetings_list.remove(&row);
+        }
+        let current = self.result_dir.borrow().clone();
+        let mut dirs = Vec::new();
+        let mut selected = None;
+        for (dir, manifest) in meeting::list() {
+            let row = meeting_row(&manifest);
+            if current.as_ref() == Some(&dir) {
+                selected = Some(row.clone());
+            }
+            self.meetings_list.append(&row);
+            dirs.push(dir);
+        }
+        *self.meeting_dirs.borrow_mut() = dirs;
+        self.meetings_list.select_row(selected.as_ref());
     }
 
     fn default_agent(&self) -> Option<Agent> {
@@ -3806,6 +3886,7 @@ impl Recorder {
             let body = rest.split_once('\n').map(|(_, body)| body).unwrap_or("");
             let _ = std::fs::write(&transcript, format!("# {title}\n{body}"));
         }
+        self.fill_meetings();
         self.toast("Saved");
     }
 
@@ -3884,9 +3965,7 @@ fn output_dir(started_at: i64, title: &str) -> PathBuf {
         .and_then(|t| t.format("%Y%m%d%H%M"))
         .map(|s| s.to_string())
         .unwrap_or_default();
-    glib::home_dir()
-        .join("Documents/Meetings")
-        .join(format!("{stamp} {}", safe_name(title)))
+    meeting::root().join(format!("{stamp} {}", safe_name(title)))
 }
 
 fn row_count(list: &gtk::ListBox) -> i32 {
@@ -3900,6 +3979,43 @@ fn row_count(list: &gtk::ListBox) -> i32 {
 /// Width in pixels of `text` in the font of `widget`.
 fn text_width(widget: &impl IsA<gtk::Widget>, text: &str) -> i32 {
     widget.create_pango_layout(Some(text)).pixel_size().0
+}
+
+/// One saved meeting in the sidebar: its name, then when it was and how long.
+fn meeting_row(manifest: &crate::meeting::Manifest) -> gtk::ListBoxRow {
+    let when = glib::DateTime::from_unix_local(manifest.started_at)
+        .and_then(|t| t.format("%e %b %Y, %H:%M"))
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let mut detail = when.trim().to_owned();
+    if manifest.duration_secs > 0 {
+        detail.push_str("  ·  ");
+        detail.push_str(&format_elapsed(manifest.duration_secs));
+    }
+    let text = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(2)
+        .margin_top(6)
+        .margin_bottom(6)
+        .margin_start(10)
+        .margin_end(10)
+        .build();
+    text.append(
+        &gtk::Label::builder()
+            .label(&manifest.title)
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .build(),
+    );
+    text.append(
+        &gtk::Label::builder()
+            .label(&detail)
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .css_classes(["dim-label", "caption"])
+            .build(),
+    );
+    gtk::ListBoxRow::builder().child(&text).build()
 }
 
 fn chapter_row(title: &str, start_ms: i64) -> gtk::ListBoxRow {

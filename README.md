@@ -130,6 +130,7 @@ If the app quits while it records (a crash, a logout, a power cut), the next sta
 - **The name** stays editable all the time. After the transcript is done, changing it (Enter, or leaving the field) renames the meeting folder and the heading in the transcript.
 - **Closing** while recording or transcribing asks first. You can stop and close, let the transcription finish in the background and quit afterwards, or cancel the transcription; the audio is kept either way.
 - **Opening a meeting later.** Double-click its `.meeting-recorder` file, or run `omarchy-meeting-recorder <folder>`. It opens on the done page with the settings it was made with. When the window is busy recording or transcribing, the meeting opens in a window of its own.
+- **Meetings.** On the done page, the list on the left is every meeting in `~/Documents/Meetings`, newest first. The one on screen is selected. Click another to open it here, or in a new window while this one is recording or transcribing.
 - **More than one window.** Ctrl+N, `omarchy-meeting-recorder new-window` or New Window in the launcher opens another one, to read an older meeting or start the next while the last one is still transcribing. Every window shows its own meeting; one records at a time. The bar widget and the keybindings follow the window that is recording, else the one transcribing.
 - **Keybindings.** `omarchy-meeting-recorder start`, `pause`, `stop` and `compact` control the running app, so you can bind them to keys in Hyprland.
 
