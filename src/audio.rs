@@ -4,6 +4,7 @@
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -102,7 +103,8 @@ impl Source {
 }
 
 fn capture(device: &str, shared: &Mutex<Inner>) {
-    let Ok(mut child) = Command::new("parec")
+    let mut command = Command::new("parec");
+    command
         .args([
             "--raw",
             "--format=s16le",
@@ -113,9 +115,17 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
             device,
         ])
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
+        .stderr(Stdio::null());
+    // parec stops with the app, even after a crash. Left on its own it keeps
+    // running once nobody reads it any more, at times at a full core (#55).
+    // SAFETY: prctl is async-signal-safe and touches only the child's own state.
+    unsafe {
+        command.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            Ok(())
+        });
+    }
+    let Ok(mut child) = command.spawn() else {
         return;
     };
     let mut stdout = child.stdout.take().expect("piped stdout");
