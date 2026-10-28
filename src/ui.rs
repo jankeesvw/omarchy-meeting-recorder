@@ -58,6 +58,12 @@ impl State {
     }
 }
 
+/// Whether the machine should stay awake in this state: the stretch after
+/// Stop, when the audio is finished and transcribed without anyone around.
+fn keeps_awake(state: State) -> bool {
+    matches!(state, State::Stopping | State::Transcribing)
+}
+
 /// Where a transcription reads its two tracks from.
 enum Tracks {
     /// The staging files of a recording that just stopped.
@@ -334,6 +340,9 @@ struct Recorder {
     webcam: crate::webcam::Webcam,
     /// Waiting for the camera's first frame before the audio starts or resumes.
     starting: Cell<bool>,
+    /// The desktop's cookie for keeping the machine awake while the meeting
+    /// is processed; 0 while it may idle.
+    awake: Cell<u32>,
     /// What the camera sees, in the webcam row, before and while recording.
     webcam_preview: gtk::Picture,
     animation: TranscribeAnimation,
@@ -932,6 +941,7 @@ impl Recorder {
             webcam_camera,
             webcam: crate::webcam::Webcam::new(frames_tx),
             starting: Cell::new(false),
+            awake: Cell::new(0),
             webcam_preview,
             animation,
             meters,
@@ -1495,7 +1505,9 @@ impl Recorder {
                     r.confirm_close_transcribing();
                     glib::Propagation::Stop
                 }
-                // Saving the audio takes a moment; finish it, then quit.
+                // Saving the audio takes a moment; finish it, then quit. The
+                // hidden window no longer keeps the machine awake for the
+                // transcription that follows; see `keep_awake`.
                 State::Stopping => {
                     r.close_when_done();
                     glib::Propagation::Stop
@@ -1803,6 +1815,7 @@ impl Recorder {
             self.dismiss_find();
         }
         self.state.set(state);
+        self.keep_awake(keeps_awake(state));
         let mut shared = self.shared.lock().unwrap();
         shared.state = if state == State::Recording && self.paused.get() {
             "paused"
@@ -1823,6 +1836,28 @@ impl Recorder {
         shared.folder = self.folder_text();
         drop(shared);
         self.render();
+    }
+
+    /// Asks the desktop not to idle while the meeting is processed, and lets
+    /// it again afterwards. Idle is what holds off the screensaver, the lock
+    /// and suspending on idle, and under a compositor with the idle-inhibit
+    /// protocol GTK grants it there; asking for suspend as well only has the
+    /// portal refuse it and GTK log a warning. Compositors honour the
+    /// inhibitor while the window is on screen, so a window hidden with
+    /// "Close when done" or "Stop and close" no longer keeps the machine awake.
+    fn keep_awake(&self, on: bool) {
+        let Some(app) = self.window.application() else {
+            return;
+        };
+        let cookie = self.awake.get();
+        if on && cookie == 0 {
+            let flags = gtk::ApplicationInhibitFlags::IDLE;
+            self.awake
+                .set(app.inhibit(Some(&self.window), flags, Some("Finishing a meeting")));
+        } else if !on && cookie != 0 {
+            app.uninhibit(cookie);
+            self.awake.set(0);
+        }
     }
 
     fn render(&self) {
@@ -3809,6 +3844,7 @@ impl Recorder {
         self.toast("Saved");
     }
 
+    /// Hidden, the window no longer keeps the machine awake; see `keep_awake`.
     fn close_when_done(&self) {
         self.quit_when_done.set(true);
         self.window.set_visible(false);
@@ -3818,7 +3854,9 @@ impl Recorder {
         let dialog = adw::AlertDialog::new(
             Some("Still recording"),
             Some(
-                "Closing stops the meeting. The audio is saved and transcribed first, then the window closes.",
+                "Closing stops the meeting. The audio is saved and transcribed in the background, \
+                 then the window closes. Hidden, the window no longer keeps the machine awake \
+                 while the transcript finishes.",
             ),
         );
         dialog.add_response("keep", "Keep recording");
@@ -3839,7 +3877,10 @@ impl Recorder {
     fn confirm_close_transcribing(self: &Rc<Self>) {
         let dialog = adw::AlertDialog::new(
             Some("Still transcribing"),
-            Some("The audio is already saved. The transcript is not finished yet."),
+            Some(
+                "The audio is already saved. The transcript is not finished yet. \
+                 Hidden, the window no longer keeps the machine awake while the transcript finishes.",
+            ),
         );
         dialog.add_response("keep", "Keep open");
         dialog.add_response("later", "Close when done");
@@ -4432,7 +4473,16 @@ fn meter_block(name: &str, meter: &gtk::DrawingArea) -> gtk::Box {
 
 #[cfg(test)]
 mod tests {
-    use super::pick_window;
+    use super::{State, keeps_awake, pick_window};
+
+    #[test]
+    fn the_machine_stays_awake_only_while_the_meeting_is_processed() {
+        assert!(keeps_awake(State::Stopping));
+        assert!(keeps_awake(State::Transcribing));
+        assert!(!keeps_awake(State::Idle));
+        assert!(!keeps_awake(State::Recording));
+        assert!(!keeps_awake(State::Done));
+    }
 
     #[test]
     fn a_resize_goes_to_the_window_it_is_for() {
