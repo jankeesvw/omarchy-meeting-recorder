@@ -259,8 +259,9 @@ impl Hub {
 /// Runs the app. `open` is a `.meeting-recorder` file or a meeting folder to show
 /// instead of starting a new recording.
 pub fn run(open: Option<&str>) -> glib::ExitCode {
+    let app_id = std::env::var("MEETING_RECORDER_APP_ID").unwrap_or_else(|_| APP_ID.into());
     let app = adw::Application::builder()
-        .application_id(APP_ID)
+        .application_id(&app_id)
         .flags(gio::ApplicationFlags::HANDLES_OPEN)
         .build();
     app.connect_startup(|app| {
@@ -1479,6 +1480,60 @@ impl Recorder {
                 this.hold_animation(&result).await;
                 this.finished(true, result);
             });
+        });
+
+        let weak = Rc::downgrade(self);
+        self.player.connect_trim(move |start_us, until_us, _duration_us| {
+            let Some(r) = weak.upgrade() else { return };
+            let Some(dir) = r.result_dir.borrow().clone() else { return };
+            let dialog = adw::AlertDialog::new(
+                Some("Save selected section?"),
+                None,
+            );
+            dialog.set_presentation_mode(adw::DialogPresentationMode::Floating);
+            dialog.set_prefer_wide_layout(true);
+            dialog.set_content_width(640);
+            let options = gtk::Label::builder()
+                .label(format!("Selection: {} to {}\n\nSave the selected audio, webcam video, and existing transcript as one new meeting. Your original meeting stays unchanged.\n\nMedia is copied without re-encoding or retranscribing. Cuts follow media packet boundaries. Review transcript text near the cuts: entries are split by their start times, not individual words.", crate::chapters::clock(start_us / 1000), crate::chapters::clock(until_us / 1000)))
+                .wrap(true)
+                .max_width_chars(72)
+                .xalign(0.0)
+                .halign(gtk::Align::Fill)
+                .hexpand(true)
+                .build();
+            dialog.set_extra_child(Some(&options));
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("save", "Save selection");
+            dialog.set_default_response(Some("cancel"));
+            dialog.set_close_response("cancel");
+            let this = r.clone();
+            dialog.connect_response(None, move |_, response| {
+                if response != "save" || this.state.get() != State::Done { return; }
+                let this = this.clone();
+                let dir = dir.clone();
+                this.player.unload();
+                this.set_state(State::Stopping);
+                glib::spawn_future_local(async move {
+                    match gio::spawn_blocking(move || {
+                        crate::trim::copy_range(&dir, start_us, until_us, "selected")
+                    }).await {
+                        Ok(Ok(out)) => {
+                            this.set_state(State::Done);
+                            this.open_meeting(&out);
+                        }
+                        result => {
+                            this.set_state(State::Done);
+                            if let Some(dir) = this.result_dir.borrow().as_ref() { this.player.load(dir); }
+                            let error = match result {
+                                Ok(Err(error)) => error,
+                                _ => "Trimming stopped unexpectedly".into(),
+                            };
+                            this.toast(&error);
+                        }
+                    }
+                });
+            });
+            dialog.present(Some(&r.window));
         });
 
         let weak = Rc::downgrade(self);

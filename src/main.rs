@@ -16,6 +16,7 @@ mod meeting;
 mod models;
 mod nemotron;
 mod player;
+mod trim;
 mod settings;
 mod notes;
 mod theme;
