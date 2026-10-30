@@ -191,6 +191,20 @@ languages = ["th", "ja", "Korean"]
 
 They are added after the built-in ones, named the way whisper names them (Thai, Japanese, Korean), and picked up the next time the app starts. A name whisper does not know is skipped. The `.en` models only transcribe English, so use a multilingual model, like the default `large-v3-turbo`, for other languages.
 
+### A transcriber of your own
+
+To transcribe somewhere else, on a machine with more GPU, or with a pipeline that also knows your colleagues' voices, name a command instead of a model:
+
+```toml
+transcriber = "~/bin/transcribe-on-my-mac"
+```
+
+When it is set, the app loads no speech model (the banner stays away) and runs your command when a meeting stops, and for **Transcribe again**, through `sh -c`. A recording gives it the two levelled mono tracks as arguments, `.tracks/mic.ogg` and `.tracks/computer.ogg` (also in `MEETING_MIC` and `MEETING_COMPUTER`); an imported file gives it that file (`MEETING_AUDIO`, with `MEETING_SPEAKER_COUNT` when you fixed the number of speakers). `MEETING_LANGUAGE` is the language you picked, or `auto`.
+
+The command prints the transcript on stdout in the app's own format, one line per turn, `**[01:23] You:** What you said.`, with the labels the app uses: `You` and `Remote`, or `You 1`, `Remote 2` and so on when several people share a side, for a recording; `Speaker 1`, `Speaker 2` for an import. A `- **Language:** English` line, as the app writes it, sets the transcript's language; everything else on stdout is ignored. What it prints on stderr shows as the stage in the animation, and a line that ends in a percentage, `transcribing 40%`, moves the progress bar. Exit non-zero to fail; the last line of stderr says why.
+
+`omarchy-meeting-recorder transcribe <mic> <computer>` prints exactly this format and always uses whisper, whatever the config says, so it can be the transcriber: a script that copies the tracks to another machine, runs it there and prints what it printed is the simplest one. Speaker names, chapters and actions work the same whichever transcriber wrote the lines.
+
 ## Actions
 
 Your own scripts, picked from the **Actions** menu on the done page: store the transcript in Obsidian, publish it, mail it around. Each is a name and a command in `~/.config/omarchy-meeting-recorder/config.toml`; the command gets the meeting folder and the meeting's details, and what it prints last shows up in the app, with an **Open** button for a link. Give one `auto = true` and it runs by itself every time a transcript is done, after the chapters when there are any: a meeting is filed in your notes, or handed to a pipeline of your own, without a click.
@@ -205,7 +219,7 @@ Your own scripts, picked from the **Actions** menu on the done page: store the t
 
 ## Privacy
 
-The audio, the transcript and everything else stay on your computer. The only thing that leaves it is the transcript text for the chapters, and only when you have set a default agent: it goes to that agent's service, the one you already chose and pay for. No agent, no chapters, nothing sent. Actions are yours: they send whatever your scripts send, and only when you pick one.
+The audio, the transcript and everything else stay on your computer. The only thing that leaves it is the transcript text for the chapters, and only when you have set a default agent: it goes to that agent's service, the one you already chose and pay for. No agent, no chapters, nothing sent. Actions are yours: they send whatever your scripts send, and only when you pick one. The same goes for a transcriber of your own: the tracks go wherever that command takes them.
 
 ## Requirements
 

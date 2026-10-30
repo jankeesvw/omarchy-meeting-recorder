@@ -20,6 +20,7 @@ mod settings;
 mod notes;
 mod theme;
 mod transcribe;
+mod transcriber;
 mod ui;
 mod webcam;
 
