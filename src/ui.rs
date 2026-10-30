@@ -28,11 +28,11 @@ const MIC_COLOR: (f64, f64, f64) = (0.21, 0.52, 0.89);
 const SYSTEM_COLOR: (f64, f64, f64) = (0.90, 0.38, 0.0);
 const FULL_SIZE: (i32, i32) = (480, 700);
 const COMPACT_SIZE: (i32, i32) = (300, 84);
-const DONE_SIZE: (i32, i32) = (1100, 760);
+const DONE_SIZE: (i32, i32) = (1340, 760);
 /// The recording page with the notes next to it: wider, just as high.
 const NOTES_SIZE: (i32, i32) = (1100, FULL_SIZE.1);
 /// The done page with the meeting's notes next to the transcript.
-const DONE_NOTES_SIZE: (i32, i32) = (1560, DONE_SIZE.1);
+const DONE_NOTES_SIZE: (i32, i32) = (1800, DONE_SIZE.1);
 /// How wide the notes are next to the transcript.
 const DONE_NOTES_WIDTH: i32 = 520;
 
@@ -385,6 +385,10 @@ struct Recorder {
     find_query: RefCell<String>,
     /// Which of `find_hits` is the one on screen.
     find_at: Cell<usize>,
+    /// Every saved meeting, newest first, on the done page.
+    meetings_list: gtk::ListBox,
+    /// Folder of each row in `meetings_list`.
+    meeting_dirs: RefCell<Vec<PathBuf>>,
     player: Player,
     /// Start of each transcript line in ms, by buffer line, for seeking and highlighting.
     segments: RefCell<Vec<(i32, i64)>>,
@@ -426,6 +430,8 @@ struct Recorder {
     pause_began: Cell<i64>,
     pause_button: gtk::Button,
     import_button: gtk::Button,
+    /// Opens a meeting recorded earlier, from its folder.
+    open_meeting_button: gtk::Button,
     model_banner: adw::Banner,
     model_downloading: Cell<bool>,
     drop_hint: gtk::Label,
@@ -619,6 +625,18 @@ impl Recorder {
             .css_classes(["flat"])
             .build();
         content.append(&import_button);
+        let open_meeting_button = gtk::Button::builder()
+            .child(
+                &adw::ButtonContent::builder()
+                    .icon_name("folder-open-symbolic")
+                    .label("Open meeting…")
+                    .build(),
+            )
+            .tooltip_text("Open a meeting recorded earlier")
+            .halign(gtk::Align::Center)
+            .css_classes(["flat"])
+            .build();
+        content.append(&open_meeting_button);
 
         // Transcribing: the animation fills the whole window.
         let animation = TranscribeAnimation::new();
@@ -700,6 +718,47 @@ impl Recorder {
             .build();
         chapters_group.add(&chapters_scroll);
         left.append(&chapters_group);
+
+        // The transcript as a file to drag into a chat, an editor or a folder.
+        let transcript_tile = gtk::Box::builder()
+            .spacing(12)
+            .css_classes(["card", "activatable", "transcript-tile"])
+            .tooltip_text("Drag the transcript into a chat, an editor or a folder")
+            .build();
+        transcript_tile.set_cursor_from_name(Some("grab"));
+        transcript_tile.append(
+            &gtk::Image::builder()
+                .icon_name("text-x-generic-symbolic")
+                .pixel_size(24)
+                .build(),
+        );
+        let tile_text = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(2)
+            .hexpand(true)
+            .valign(gtk::Align::Center)
+            .build();
+        tile_text.append(
+            &gtk::Label::builder()
+                .label("transcript.md")
+                .xalign(0.0)
+                .build(),
+        );
+        tile_text.append(
+            &gtk::Label::builder()
+                .label("Drag it anywhere")
+                .xalign(0.0)
+                .css_classes(["dim-label", "caption"])
+                .build(),
+        );
+        transcript_tile.append(&tile_text);
+        transcript_tile.append(
+            &gtk::Image::builder()
+                .icon_name("list-drag-handle-symbolic")
+                .css_classes(["dim-label"])
+                .build(),
+        );
+        left.append(&transcript_tile);
 
         let copy_button = gtk::Button::builder()
             .label("Copy transcript")
@@ -821,6 +880,41 @@ impl Recorder {
         pip.add_css_class("webcam-pip");
         transcript_layers.add_overlay(pip);
 
+        // Every saved meeting, so a transcript can be opened without the file manager.
+        let meetings_list = gtk::ListBox::builder()
+            .css_classes(["navigation-sidebar"])
+            .selection_mode(gtk::SelectionMode::Single)
+            .activate_on_single_click(true)
+            .build();
+        meetings_list.set_placeholder(Some(
+            &gtk::Label::builder()
+                .label("No meetings yet")
+                .css_classes(["dim-label"])
+                .margin_top(14)
+                .margin_bottom(14)
+                .build(),
+        ));
+        let meetings_scroll = gtk::ScrolledWindow::builder()
+            .child(&meetings_list)
+            .vexpand(true)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .build();
+        let meetings_side = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(6)
+            .width_request(220)
+            .hexpand(false)
+            .build();
+        meetings_side.append(
+            &gtk::Label::builder()
+                .label("Meetings")
+                .xalign(0.0)
+                .margin_start(12)
+                .css_classes(["heading"])
+                .build(),
+        );
+        meetings_side.append(&meetings_scroll);
+
         let done = gtk::Box::builder()
             .spacing(24)
             .margin_top(12)
@@ -828,7 +922,7 @@ impl Recorder {
             .margin_start(24)
             .margin_end(24)
             .build();
-        // A fixed, narrow column on the left; the transcript takes the rest.
+        // Meetings, then the open meeting, then the transcript.
         let left_column = adw::Clamp::builder()
             .child(&left)
             .maximum_size(320)
@@ -836,6 +930,7 @@ impl Recorder {
             .width_request(320)
             .hexpand(false)
             .build();
+        done.append(&meetings_side);
         done.append(&left_column);
         done.append(&right);
 
@@ -975,6 +1070,8 @@ impl Recorder {
             find_hits: RefCell::default(),
             find_query: RefCell::default(),
             find_at: Cell::new(0),
+            meetings_list,
+            meeting_dirs: RefCell::default(),
             player,
             segments: RefCell::default(),
             lines: RefCell::default(),
@@ -1004,6 +1101,7 @@ impl Recorder {
             pause_began: Cell::new(0),
             pause_button,
             import_button,
+            open_meeting_button,
             model_banner,
             model_downloading: Cell::new(false),
             drop_hint,
@@ -1018,7 +1116,7 @@ impl Recorder {
             live_notes: RefCell::default(),
             showing_meeting_notes: Cell::new(false),
         });
-        recorder.connect_signals(&open_button, &new_button);
+        recorder.connect_signals(&open_button, &new_button, &transcript_tile);
         recorder.connect_find(&find_close);
         recorder.render();
         recorder
@@ -1104,7 +1202,33 @@ impl Recorder {
         }
     }
 
-    fn connect_signals(self: &Rc<Self>, open_button: &gtk::Button, new_button: &gtk::Button) {
+    fn connect_signals(
+        self: &Rc<Self>,
+        open_button: &gtk::Button,
+        new_button: &gtk::Button,
+        transcript_tile: &gtk::Box,
+    ) {
+        let weak = Rc::downgrade(self);
+        transcript_tile.add_controller(transcript_drag(move || {
+            weak.upgrade()?.result_dir.borrow().clone()
+        }));
+
+        let weak = Rc::downgrade(self);
+        self.meetings_list.connect_row_activated(move |_, row| {
+            let Some(r) = weak.upgrade() else {
+                return;
+            };
+            let dir = r.meeting_dirs.borrow().get(row.index() as usize).cloned();
+            let Some(dir) = dir else {
+                return;
+            };
+            // The selected row is the meeting already on screen.
+            if r.result_dir.borrow().as_deref() == Some(dir.as_path()) {
+                return;
+            }
+            r.open_meeting(&dir);
+        });
+
         let weak = Rc::downgrade(self);
         self.notes.close_button.connect_clicked(move |_| {
             let Some(r) = weak.upgrade() else { return };
@@ -1174,8 +1298,10 @@ impl Recorder {
         // the content alone. The file is only read; it is always a copy.
         drop.connect_accept(|_, offer| {
             let formats = offer.formats();
-            formats.contains_type(gtk::gdk::FileList::static_type())
-                || formats.contains_type(gio::File::static_type())
+            // A drag that starts in this app is a transcript on its way out.
+            offer.drag().is_none()
+                && (formats.contains_type(gtk::gdk::FileList::static_type())
+                    || formats.contains_type(gio::File::static_type()))
         });
         drop.connect_motion(|_, _, _| gtk::gdk::DragAction::COPY);
         let weak = Rc::downgrade(self);
@@ -1233,6 +1359,21 @@ impl Recorder {
             dialog.open(Some(&r.window), gio::Cancellable::NONE, move |result| {
                 if let Some(path) = result.ok().and_then(|f| f.path()) {
                     this.confirm_import(path);
+                }
+            });
+        });
+
+        let weak = Rc::downgrade(self);
+        self.open_meeting_button.connect_clicked(move |_| {
+            let Some(r) = weak.upgrade() else { return };
+            let dialog = gtk::FileDialog::builder()
+                .title("Open Meeting")
+                .initial_folder(&gio::File::for_path(meeting::root()))
+                .build();
+            let this = r.clone();
+            dialog.select_folder(Some(&r.window), gio::Cancellable::NONE, move |result| {
+                if let Some(dir) = result.ok().and_then(|f| f.path()) {
+                    this.open_meeting(&dir);
                 }
             });
         });
@@ -1959,9 +2100,9 @@ impl Recorder {
             return;
         }
         let minimum = if size == DONE_SIZE {
-            (820, 560)
+            (1040, 560)
         } else if size == DONE_NOTES_SIZE {
-            (820 + DONE_NOTES_WIDTH, 560)
+            (1040 + DONE_NOTES_WIDTH, 560)
         } else if size == NOTES_SIZE {
             (900, 600)
         } else {
@@ -2783,6 +2924,7 @@ impl Recorder {
             self.player.load(dir);
         }
         self.show_transcript(text.as_deref(), problem.as_deref());
+        self.fill_meetings();
         self.transcript_scroll.vadjustment().set_value(0.0);
         let actions_follow = problem.is_none() && !crate::actions::automatic().is_empty();
         if let Some(problem) = problem {
@@ -2889,6 +3031,7 @@ impl Recorder {
             .then_some("This meeting has no transcript yet.");
         self.player.load(&dir);
         self.show_transcript(text.as_deref(), problem);
+        self.fill_meetings();
         self.transcript_scroll.vadjustment().set_value(0.0);
         // Never leave the focus in the name: typing would rename the meeting.
         self.window.set_default_widget(Some(&self.copy_button));
@@ -3016,6 +3159,28 @@ impl Recorder {
         let meta = meta.join("  ·  ");
         self.done_meta.set_label(&meta);
         self.done_meta.set_visible(!meta.is_empty());
+    }
+
+    /// Fills the meetings list from disk, newest first, and selects the open one.
+    fn fill_meetings(&self) {
+        while let Some(row) = self.meetings_list.row_at_index(0) {
+            self.meetings_list.remove(&row);
+        }
+        let current = self.result_dir.borrow().clone();
+        let mut dirs = Vec::new();
+        let mut selected = None;
+        for (dir, manifest) in meeting::list() {
+            let row = meeting_row(&manifest);
+            let from = dir.clone();
+            row.add_controller(transcript_drag(move || Some(from.clone())));
+            if current.as_ref() == Some(&dir) {
+                selected = Some(row.clone());
+            }
+            self.meetings_list.append(&row);
+            dirs.push(dir);
+        }
+        *self.meeting_dirs.borrow_mut() = dirs;
+        self.meetings_list.select_row(selected.as_ref());
     }
 
     fn default_agent(&self) -> Option<Agent> {
@@ -3841,6 +4006,7 @@ impl Recorder {
             let body = rest.split_once('\n').map(|(_, body)| body).unwrap_or("");
             let _ = std::fs::write(&transcript, format!("# {title}\n{body}"));
         }
+        self.fill_meetings();
         self.toast("Saved");
     }
 
@@ -3925,9 +4091,7 @@ fn output_dir(started_at: i64, title: &str) -> PathBuf {
         .and_then(|t| t.format("%Y%m%d%H%M"))
         .map(|s| s.to_string())
         .unwrap_or_default();
-    glib::home_dir()
-        .join("Documents/Meetings")
-        .join(format!("{stamp} {}", safe_name(title)))
+    meeting::root().join(format!("{stamp} {}", safe_name(title)))
 }
 
 fn row_count(list: &gtk::ListBox) -> i32 {
@@ -3941,6 +4105,65 @@ fn row_count(list: &gtk::ListBox) -> i32 {
 /// Width in pixels of `text` in the font of `widget`.
 fn text_width(widget: &impl IsA<gtk::Widget>, text: &str) -> i32 {
     widget.create_pango_layout(Some(text)).pixel_size().0
+}
+
+/// Drags the transcript of the meeting in `dir`: the file first, for a chat,
+/// a browser or a file manager, and the text for anything that only takes text.
+/// Nothing is dragged while the meeting has no transcript.
+fn transcript_drag(dir: impl Fn() -> Option<PathBuf> + 'static) -> gtk::DragSource {
+    let source = gtk::DragSource::builder()
+        .actions(gtk::gdk::DragAction::COPY)
+        .build();
+    source.connect_prepare(move |_, _, _| {
+        let path = dir()?.join("transcript.md");
+        let text = std::fs::read_to_string(&path).ok()?;
+        let files = gtk::gdk::FileList::from_array(&[gio::File::for_path(&path)]);
+        Some(gtk::gdk::ContentProvider::new_union(&[
+            gtk::gdk::ContentProvider::for_value(&files.to_value()),
+            gtk::gdk::ContentProvider::for_bytes(
+                "text/plain;charset=utf-8",
+                &glib::Bytes::from_owned(text),
+            ),
+        ]))
+    });
+    source
+}
+
+/// One saved meeting in the sidebar: its name, then when it was and how long.
+fn meeting_row(manifest: &crate::meeting::Manifest) -> gtk::ListBoxRow {
+    let when = glib::DateTime::from_unix_local(manifest.started_at)
+        .and_then(|t| t.format("%e %b %Y, %H:%M"))
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let mut detail = when.trim().to_owned();
+    if manifest.duration_secs > 0 {
+        detail.push_str("  ·  ");
+        detail.push_str(&format_elapsed(manifest.duration_secs));
+    }
+    let text = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(2)
+        .margin_top(6)
+        .margin_bottom(6)
+        .margin_start(10)
+        .margin_end(10)
+        .build();
+    text.append(
+        &gtk::Label::builder()
+            .label(&manifest.title)
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .build(),
+    );
+    text.append(
+        &gtk::Label::builder()
+            .label(&detail)
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .css_classes(["dim-label", "caption"])
+            .build(),
+    );
+    gtk::ListBoxRow::builder().child(&text).build()
 }
 
 fn chapter_row(title: &str, start_ms: i64) -> gtk::ListBoxRow {
@@ -4316,6 +4539,7 @@ fn load_css() {
          window.immersive headerbar { background: transparent; box-shadow: none; color: #f8f5f2; }
          window.immersive headerbar button { color: #f8f5f2; }
          .transcript { background: transparent; padding: 8px; }
+         .transcript-tile { padding: 10px 14px; }
          .transcript row { padding: 7px 10px; border-radius: 8px; }
          .transcript row:hover { background: alpha(currentColor, 0.06); }
          .transcript row.current { background: alpha(@accent_bg_color, 0.25); }
