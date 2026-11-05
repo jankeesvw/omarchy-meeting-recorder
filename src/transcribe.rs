@@ -633,6 +633,27 @@ fn hex(bytes: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 // Transcription
 
+/// Threads for whisper and the speaker model: half the cores, so a call
+/// going on next to a transcription keeps the rest.
+pub fn worker_threads() -> usize {
+    std::thread::available_parallelism()
+        .map_or(4, |n| n.get() / 2)
+        .max(1)
+}
+
+/// Gives the CPU to everything else first: nice 19 for the calling thread.
+/// Linux keeps the nice value per thread and new threads inherit it, so the
+/// whisper and speaker-model workers started from here run at 19 too.
+fn yield_cpu() {
+    // SAFETY: setpriority on the calling thread (who = 0) touches no memory.
+    if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 19) } != 0 {
+        eprintln!(
+            "could not lower the transcription's priority: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
 /// Transcribes the meeting. `language` is a whisper code or "auto".
 pub fn transcribe(
     mic: &[f32],
@@ -641,6 +662,7 @@ pub fn transcribe(
     events: &Events,
     abort: &Abort,
 ) -> Result<Transcript, String> {
+    yield_cpu();
     let duration_secs = (mic.len().max(computer.len()) / WHISPER_RATE) as i64;
     let empty = |language: &str| Transcript {
         segments: Vec::new(),
@@ -952,6 +974,7 @@ pub fn transcribe_single(
     events: &Events,
     abort: &Abort,
 ) -> Result<Transcript, String> {
+    yield_cpu();
     let duration_secs = (track.len() / WHISPER_RATE) as i64;
     let empty = || Transcript {
         segments: Vec::new(),
@@ -1092,8 +1115,7 @@ fn run_whisper(
 ) -> Result<(Vec<Word>, Option<String>), String> {
     let mut state = context.create_state().map_err(|e| e.to_string())?;
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-    params.set_n_threads(threads.min(16) as i32);
+    params.set_n_threads(worker_threads().min(16) as i32);
     params.set_language(Some(language));
     params.set_print_special(false);
     params.set_print_progress(false);

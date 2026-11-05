@@ -119,9 +119,7 @@ fn ort_error(e: impl std::fmt::Display) -> String {
 
 impl Model {
     pub fn load(path: &Path) -> Result<Self, String> {
-        let threads = std::thread::available_parallelism()
-            .map_or(4, |n| n.get())
-            .min(8);
+        let threads = crate::transcribe::worker_threads().min(8);
         let session = Session::builder()
             .map_err(ort_error)?
             .with_intra_threads(threads)
