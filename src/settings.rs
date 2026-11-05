@@ -113,6 +113,15 @@ pub fn save_your_name(name: &str) {
     save("your_name", name);
 }
 
+/// The SSH host that transcribes recordings, "" for this computer.
+pub fn load_remote() -> String {
+    load()["remote"].as_str().unwrap_or_default().to_owned()
+}
+
+pub fn save_remote(host: &str) {
+    save("remote", host);
+}
+
 /// Whether the app already asked to put its widget in the bar.
 pub fn bar_widget_offered() -> bool {
     load()["bar_widget_offered"].as_str() == Some("yes")

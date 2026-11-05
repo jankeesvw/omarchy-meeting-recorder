@@ -3,7 +3,7 @@
 //! animation, edge to edge) and done (the transcript and what to do with it).
 
 use std::cell::{Cell, RefCell};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -65,6 +65,31 @@ fn keeps_awake(state: State) -> bool {
 }
 
 /// Where a transcription reads its two tracks from.
+/// The transcription on the `remote` host of config.toml, from the Opus
+/// tracks in the meeting folder. None (transcribe here) when no host is set,
+/// the tracks are missing or the host fails; a cancel is kept.
+fn remote_transcription(
+    meeting_dir: &Path,
+    language: &str,
+    events: &transcribe::Events,
+    abort: &Abort,
+) -> Option<Result<transcribe::Transcript, String>> {
+    let host = crate::remote::host()?;
+    let (mic, computer) = export::tracks(meeting_dir);
+    if !(mic.exists() && computer.exists()) {
+        return None;
+    }
+    match crate::remote::transcribe(&host, &mic, &computer, language, events, abort) {
+        Err(e) if e != CANCELLED => {
+            eprintln!("transcribing here, {host} failed: {e}");
+            let stage = format!("{host} failed, transcribing here");
+            let _ = events.send_blocking(Event::Stage(stage));
+            None
+        }
+        result => Some(result),
+    }
+}
+
 enum Tracks {
     /// The staging files of a recording that just stopped.
     Raw(PathBuf),
@@ -364,6 +389,33 @@ fn device_row(source: &Source, outputs: bool) -> adw::ComboRow {
     row
 }
 
+/// Where recordings are transcribed: this computer or an SSH host. A saved
+/// host gone from `~/.ssh/config` is still listed, so the choice shows.
+fn remote_row() -> adw::ComboRow {
+    let saved = settings::load_remote();
+    let mut hosts = crate::remote::ssh_hosts();
+    if !saved.is_empty() && !hosts.contains(&saved) {
+        hosts.push(saved.clone());
+    }
+    let mut labels = vec!["This computer"];
+    labels.extend(hosts.iter().map(String::as_str));
+    let row = adw::ComboRow::builder()
+        .title("Transcribe on")
+        .subtitle("Another computer over SSH, this one if it can't be reached")
+        .model(&gtk::StringList::new(&labels))
+        .build();
+    let selected = hosts.iter().position(|host| *host == saved);
+    row.set_selected(selected.map_or(0, |i| i as u32 + 1));
+    row.connect_selected_notify(move |row| {
+        let host = (row.selected() as usize)
+            .checked_sub(1)
+            .and_then(|i| hosts.get(i))
+            .map_or("", String::as_str);
+        settings::save_remote(host);
+    });
+    row
+}
+
 struct Recorder {
     window: adw::ApplicationWindow,
     view: adw::ToolbarView,
@@ -603,6 +655,7 @@ impl Recorder {
         group.add(&device_row(&system, true));
         group.add(&format_row);
         group.add(&language_row);
+        group.add(&remote_row());
         group.add(&webcam_row);
         content.append(&group);
 
@@ -2643,21 +2696,27 @@ impl Recorder {
         *self.abort.borrow_mut() = Some(abort.clone());
         let (events_tx, events_rx) = async_channel::unbounded::<Event>();
         let (done_tx, done_rx) = async_channel::bounded(1);
+        let meeting_dir = out.clone();
         std::thread::spawn(move || {
             let result = match tracks {
                 Tracks::Single(path, speakers) => transcribe::load_track(&path).and_then(|track| {
                     transcribe::transcribe_single(&track, language, speakers, &events_tx, &abort)
                 }),
                 Tracks::Raw(dir) | Tracks::Kept(dir) => {
-                    let (mic_path, computer_path) = if dir.join("mic.raw").exists() {
-                        (dir.join("mic.raw"), dir.join("system.raw"))
-                    } else {
-                        export::tracks(&dir)
-                    };
-                    transcribe::load_track(&mic_path).and_then(|mic| {
-                        let computer = transcribe::load_track(&computer_path)?;
-                        transcribe::transcribe(&mic, &computer, language, &events_tx, &abort)
-                    })
+                    remote_transcription(&meeting_dir, language, &events_tx, &abort)
+                        .unwrap_or_else(|| {
+                            let (mic_path, computer_path) = if dir.join("mic.raw").exists() {
+                                (dir.join("mic.raw"), dir.join("system.raw"))
+                            } else {
+                                export::tracks(&dir)
+                            };
+                            transcribe::load_track(&mic_path).and_then(|mic| {
+                                let computer = transcribe::load_track(&computer_path)?;
+                                transcribe::transcribe(
+                                    &mic, &computer, language, &events_tx, &abort,
+                                )
+                            })
+                        })
                 }
             };
             let _ = done_tx.send_blocking(result);
