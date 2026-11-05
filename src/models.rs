@@ -16,10 +16,16 @@ use crate::transcribe::{Abort, Events, download, models_dir};
 
 pub const DEFAULT: &str = "large-v3-turbo";
 
+/// A fixed revision, so a later change upstream never reaches the app unseen.
+const REPO: &str =
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1";
+
 pub struct Model {
     pub name: &'static str,
     /// Download size in MB, for the text in the app.
     pub size_mb: u32,
+    /// Of the file at `REPO`'s revision; a download that differs is thrown away.
+    sha256: &'static str,
     preset: DtwModelPreset,
 }
 
@@ -27,51 +33,61 @@ pub const MODELS: [Model; 10] = [
     Model {
         name: "tiny",
         size_mb: 75,
+        sha256: "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
         preset: DtwModelPreset::Tiny,
     },
     Model {
         name: "tiny.en",
         size_mb: 75,
+        sha256: "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f",
         preset: DtwModelPreset::TinyEn,
     },
     Model {
         name: "base",
         size_mb: 142,
+        sha256: "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
         preset: DtwModelPreset::Base,
     },
     Model {
         name: "base.en",
         size_mb: 142,
+        sha256: "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002",
         preset: DtwModelPreset::BaseEn,
     },
     Model {
         name: "small",
         size_mb: 466,
+        sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
         preset: DtwModelPreset::Small,
     },
     Model {
         name: "small.en",
         size_mb: 466,
+        sha256: "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
         preset: DtwModelPreset::SmallEn,
     },
     Model {
         name: "medium",
         size_mb: 1500,
+        sha256: "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208",
         preset: DtwModelPreset::Medium,
     },
     Model {
         name: "medium.en",
         size_mb: 1500,
+        sha256: "cc37e93478338ec7700281a7ac30a10128929eb8f427dda2e865faa8f6da4356",
         preset: DtwModelPreset::MediumEn,
     },
     Model {
         name: "large-v3",
         size_mb: 3100,
+        sha256: "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2",
         preset: DtwModelPreset::LargeV3,
     },
     Model {
         name: "large-v3-turbo",
         size_mb: 1600,
+        sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
         preset: DtwModelPreset::LargeV3Turbo,
     },
 ];
@@ -177,15 +193,11 @@ pub fn ensure(events: &Events, abort: &Abort) -> Result<PathBuf, String> {
         ));
     };
     let target = models_dir().join(file_name(model));
-    let url = format!(
-        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
-        file_name(model)
-    );
     download(
-        &url,
+        &format!("{REPO}/{}", file_name(model)),
         &target,
         "Downloading model",
-        u64::from(model.size_mb) * 800_000,
+        model.sha256,
         events,
         abort,
     )?;
@@ -206,5 +218,14 @@ mod tests {
         assert_eq!(known("large-v3").map(|m| m.name), Some("large-v3"));
         assert_eq!(known("ggml-small.en.bin").map(|m| m.name), Some("small.en"));
         assert!(known("gpt-5").is_none());
+    }
+
+    #[test]
+    fn every_model_has_a_whole_checksum() {
+        let hex = |b: u8| matches!(b, b'0'..=b'9' | b'a'..=b'f');
+        for model in &MODELS {
+            assert_eq!(model.sha256.len(), 64, "{}", model.name);
+            assert!(model.sha256.bytes().all(hex), "{}", model.name);
+        }
     }
 }

@@ -887,6 +887,7 @@ dependencies = [
  "libc",
  "ort",
  "realfft",
+ "ring",
  "serde_json",
  "ureq",
  "whisper-rs",

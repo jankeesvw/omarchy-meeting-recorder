@@ -561,12 +561,13 @@ pub fn models_dir() -> PathBuf {
 }
 
 /// Downloads `url` to `target` through a `.part` file, reporting progress as
-/// "`label` 42%". Refuses a result smaller than `min_bytes`.
+/// "`label` 42%". The file is a model that native code is about to parse, so
+/// it only takes the place of `target` when its SHA-256 is `sha256`.
 pub fn download(
     url: &str,
     target: &Path,
     label: &str,
-    min_bytes: u64,
+    sha256: &str,
     events: &Events,
     abort: &Abort,
 ) -> Result<(), String> {
@@ -584,6 +585,7 @@ pub fn download(
     let mut reader = response.into_body().into_reader();
     let mut file = BufWriter::new(File::create(&part).map_err(|e| e.to_string())?);
     let mut buf = vec![0u8; 1 << 16];
+    let mut hash = ring::digest::Context::new(&ring::digest::SHA256);
     let (mut done, mut last_pct) = (0u64, u64::MAX);
     loop {
         if abort.load(Ordering::Relaxed) {
@@ -598,6 +600,7 @@ pub fn download(
             break;
         }
         file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        hash.update(&buf[..n]);
         done += n as u64;
         if let Some(total) = total.filter(|t| *t > 0) {
             let pct = done * 100 / total;
@@ -610,11 +613,21 @@ pub fn download(
     }
     file.flush().map_err(|e| e.to_string())?;
     drop(file);
-    if total.is_some_and(|t| t != done) || done < min_bytes {
+    if total.is_some_and(|t| t != done) {
         let _ = std::fs::remove_file(&part);
         return Err(format!("the download of {url} was incomplete"));
     }
+    if hex(hash.finish().as_ref()) != sha256 {
+        let _ = std::fs::remove_file(&part);
+        return Err(format!(
+            "the download of {url} is not the file the app expects (its SHA-256 differs)"
+        ));
+    }
     std::fs::rename(&part, target).map_err(|e| e.to_string())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 // ---------------------------------------------------------------------------
