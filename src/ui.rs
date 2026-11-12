@@ -1752,6 +1752,11 @@ impl Recorder {
         let on_page = !self.compact.get()
             && self.layout.visible_child_name().as_deref() == Some("record");
         self.webcam_preview.set_visible(on);
+        // The row's prefix box stays visible around a hidden picture, and its
+        // spacing then pushes the title out of line with the other rows.
+        if let Some(prefixes) = self.webcam_preview.parent() {
+            prefixes.set_visible(on);
+        }
         self.webcam_preview
             .set_opacity(if self.paused.get() { 0.4 } else { 1.0 });
         if !on {
