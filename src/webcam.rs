@@ -36,13 +36,26 @@ pub fn devices() -> Vec<(PathBuf, String)> {
     found
 }
 
+/// The cameras to choose from: each name once, on its first device (a camera
+/// has more, for metadata), without dummy loopback devices.
+pub fn cameras(devices: &[(PathBuf, String)]) -> Vec<(PathBuf, String)> {
+    let mut cameras: Vec<(PathBuf, String)> = Vec::new();
+    for (device, name) in devices {
+        if !name.starts_with("Dummy video device") && !cameras.iter().any(|(_, n)| n == name) {
+            cameras.push((device.clone(), name.clone()));
+        }
+    }
+    cameras
+}
+
 /// The camera the webcam toggle records: the one named `saved` when it is
-/// there, else the first that is not a dummy loopback device.
+/// there, else the first of `cameras`.
 pub fn pick(devices: &[(PathBuf, String)], saved: &str) -> Option<(PathBuf, String)> {
-    devices
+    let cameras = cameras(devices);
+    cameras
         .iter()
         .find(|(_, name)| !saved.is_empty() && name == saved)
-        .or_else(|| devices.iter().find(|(_, name)| !name.starts_with("Dummy video device")))
+        .or(cameras.first())
         .cloned()
 }
 
@@ -461,6 +474,20 @@ mod tests {
         assert_eq!(pick(&devices, "Laptop camera").map(|d| d.1), Some("Laptop camera".to_owned()));
         assert_eq!(pick(&devices, "Gone").map(|d| d.1), Some("Opal C1".to_owned()));
         assert_eq!(pick(&devices[..1], ""), None);
+    }
+
+    #[test]
+    fn each_camera_is_offered_once_on_its_first_device() {
+        let devices = vec![
+            (PathBuf::from("/dev/video0"), "Laptop camera".to_owned()),
+            (PathBuf::from("/dev/video1"), "Laptop camera".to_owned()),
+            (PathBuf::from("/dev/video8"), "Dummy video device (0x0000)".to_owned()),
+            (PathBuf::from("/dev/video4"), "Opal C1".to_owned()),
+            (PathBuf::from("/dev/video5"), "Opal C1".to_owned()),
+        ];
+        let offered: Vec<_> = cameras(&devices).into_iter().map(|(d, _)| d).collect();
+        assert_eq!(offered, [PathBuf::from("/dev/video0"), PathBuf::from("/dev/video4")]);
+        assert_eq!(pick(&devices, "Opal C1").map(|d| d.0), Some(PathBuf::from("/dev/video4")));
     }
 
     #[test]
