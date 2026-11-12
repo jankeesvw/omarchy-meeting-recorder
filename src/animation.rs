@@ -93,7 +93,11 @@ struct Model {
     start_time: Option<i64>,
     now: f64,
     tick: Option<gtk::TickCallbackId>,
+    /// When the last frame was drawn, in frame-clock microseconds.
+    last_frame: i64,
     grain: Vec<ImageSurface>,
+    /// The vignette never moves: drawn once per size, then copied.
+    vignette: Option<ImageSurface>,
 }
 
 #[derive(Clone)]
@@ -177,6 +181,10 @@ impl TranscribeAnimation {
                 m.now = (frame - start) as f64 / 1_000_000.0;
                 // Ease the bar towards the real value instead of jumping.
                 m.shown_progress += (m.progress - m.shown_progress) * 0.08;
+                if frame - m.last_frame < FRAME_INTERVAL_US {
+                    return glib::ControlFlow::Continue;
+                }
+                m.last_frame = frame;
                 drop(m);
                 area.queue_draw();
                 glib::ControlFlow::Continue
@@ -212,6 +220,9 @@ fn grain(seed: u64) -> ImageSurface {
     surface
 }
 
+/// 30 frames a second: the scene moves slowly, and every frame is drawn on the CPU.
+const FRAME_INTERVAL_US: i64 = 1_000_000 / 30;
+
 fn set(cr: &Context, c: Rgb, alpha: f64) {
     cr.set_source_rgba(c.0, c.1, c.2, alpha);
 }
@@ -225,9 +236,7 @@ fn draw(cr: &Context, w: f64, h: f64, m: &mut Model) {
 
     // Everything neon is drawn small and blown up for the bloom, a tight pass
     // and a wide one, and then once more crisp on top.
-    for (bloom_scale, alpha) in [(6.0, 0.7), (16.0, 0.9)] {
-        bloom(cr, w, h, bloom_scale, alpha, |g| neon(g, w, h, horizon, t));
-    }
+    bloom(cr, w, h, |g| neon(g, w, h, horizon, t));
     neon(cr, w, h, horizon, t);
 
     title(cr, w, h, t);
@@ -235,28 +244,74 @@ fn draw(cr: &Context, w: f64, h: f64, m: &mut Model) {
     crt(cr, w, h, t, m);
 }
 
-/// Renders `paint` at 1/`scale` and paints it back up with bilinear filtering,
-/// which is a cheap blur, added on top of what is already there.
-fn bloom(cr: &Context, w: f64, h: f64, scale: f64, alpha: f64, paint: impl Fn(&Context)) {
-    let Ok(small) = ImageSurface::create(
+/// Darkens the edges; drawn once per window size.
+fn vignette(w: f64, h: f64) -> Option<ImageSurface> {
+    let surface = ImageSurface::create(Format::ARgb32, w.ceil() as i32, h.ceil() as i32).ok()?;
+    let cr = Context::new(&surface).ok()?;
+    let vignette =
+        cairo::RadialGradient::new(w / 2.0, h / 2.0, h * 0.3, w / 2.0, h / 2.0, w.max(h) * 0.75);
+    vignette.add_color_stop_rgba(0.0, 0.0, 0.0, 0.0, 0.0);
+    vignette.add_color_stop_rgba(1.0, 0.0, 0.0, 0.0, 0.55);
+    cr.set_source(&vignette).ok();
+    let _ = cr.paint();
+    drop(cr);
+    Some(surface)
+}
+
+/// Renders `paint` at 1/`scale` into a new surface.
+fn shrunk(w: f64, h: f64, scale: f64, paint: &impl Fn(&Context)) -> Option<ImageSurface> {
+    let small = ImageSurface::create(
         Format::ARgb32,
         (w / scale).ceil() as i32,
         (h / scale).ceil() as i32,
-    ) else {
-        return;
-    };
-    let Ok(g) = Context::new(&small) else { return };
+    )
+    .ok()?;
+    let g = Context::new(&small).ok()?;
     g.scale(1.0 / scale, 1.0 / scale);
     paint(&g);
     drop(g);
+    Some(small)
+}
+
+/// Adds `small`, scaled up by `scale`, onto `cr`.
+fn add_scaled(cr: &Context, small: &ImageSurface, scale: f64, alpha: f64, filter: Filter) {
     let _ = cr.save();
     cr.scale(scale, scale);
-    let pattern = SurfacePattern::create(&small);
-    pattern.set_filter(Filter::Good);
+    let pattern = SurfacePattern::create(small);
+    pattern.set_filter(filter);
     cr.set_source(&pattern).ok();
     cr.set_operator(Operator::Add);
     let _ = cr.paint_with_alpha(alpha);
     let _ = cr.restore();
+}
+
+/// The glow: `paint` rendered at 1/6 and at 1/16 and blown back up, which is a
+/// cheap blur. Smooth scaling costs per pixel it writes, so the two passes are
+/// combined while small, smoothed up to half the window and only then doubled,
+/// without smoothing, to the full size: the glow is soft enough not to show it.
+fn bloom(cr: &Context, w: f64, h: f64, paint: impl Fn(&Context)) {
+    let (Some(tight), Some(wide)) = (shrunk(w, h, 6.0, &paint), shrunk(w, h, 16.0, &paint)) else {
+        return;
+    };
+    let Ok(glow) = ImageSurface::create(Format::ARgb32, tight.width(), tight.height()) else {
+        return;
+    };
+    let Ok(g) = Context::new(&glow) else { return };
+    g.set_source_surface(&tight, 0.0, 0.0).ok();
+    let _ = g.paint_with_alpha(0.7);
+    add_scaled(&g, &wide, 16.0 / 6.0, 0.9, Filter::Good);
+    drop(g);
+    let Ok(half) = ImageSurface::create(
+        Format::ARgb32,
+        (w / 2.0).ceil() as i32,
+        (h / 2.0).ceil() as i32,
+    ) else {
+        return;
+    };
+    let Ok(g) = Context::new(&half) else { return };
+    add_scaled(&g, &glow, 3.0, 1.0, Filter::Good);
+    drop(g);
+    add_scaled(cr, &half, 2.0, 1.0, Filter::Nearest);
 }
 
 /// Sky glow, the sun of shapes and the grid: the parts that bloom.
@@ -595,7 +650,7 @@ fn rounded(cr: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
 }
 
 /// Scanlines, stepped grain, a rolling bar, vignette and a faint flicker.
-fn crt(cr: &Context, w: f64, h: f64, t: f64, m: &Model) {
+fn crt(cr: &Context, w: f64, h: f64, t: f64, m: &mut Model) {
     set(cr, (0.0, 0.0, 0.0), 0.16);
     let mut y = 0.0;
     while y < h {
@@ -627,12 +682,14 @@ fn crt(cr: &Context, w: f64, h: f64, t: f64, m: &Model) {
     cr.set_source(&band).ok();
     let _ = cr.paint();
 
-    let vignette =
-        cairo::RadialGradient::new(w / 2.0, h / 2.0, h * 0.3, w / 2.0, h / 2.0, w.max(h) * 0.75);
-    vignette.add_color_stop_rgba(0.0, 0.0, 0.0, 0.0, 0.0);
-    vignette.add_color_stop_rgba(1.0, 0.0, 0.0, 0.0, 0.55);
-    cr.set_source(&vignette).ok();
-    let _ = cr.paint();
+    let size = (w.ceil() as i32, h.ceil() as i32);
+    if m.vignette.as_ref().map(|v| (v.width(), v.height())) != Some(size) {
+        m.vignette = vignette(w, h);
+    }
+    if let Some(vignette) = &m.vignette {
+        cr.set_source_surface(vignette, 0.0, 0.0).ok();
+        let _ = cr.paint();
+    }
 
     let flicker = 0.02 * hash((t * 30.0) as u64);
     set(cr, dark(), flicker);
