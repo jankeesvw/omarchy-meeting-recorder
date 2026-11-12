@@ -1309,8 +1309,10 @@ impl Recorder {
             settings::save_webcam(&camera.1);
             r.webcam_row.set_subtitle(&webcam_subtitle(Some(&camera)));
             *r.webcam_camera.borrow_mut() = Some(camera);
-            // The preview lets go of the old camera and opens the new one.
+            // The preview lets go of the old camera and opens the new one,
+            // without its last frame standing in for a camera that shows nothing.
             r.webcam.preview(None);
+            r.webcam_preview.set_paintable(None::<&gtk::gdk::Paintable>);
             r.update_preview();
         });
 
@@ -2486,12 +2488,15 @@ impl Recorder {
         // The audio waits for the camera's first frame, so the two start together.
         self.starting.set(true);
         self.button.set_sensitive(false);
+        // The camera that is opening is the one recorded: no picking another meanwhile.
+        self.camera_row.set_sensitive(false);
         self.status_label.set_label("Starting the camera…");
         let this = self.clone();
         glib::spawn_future_local(async move {
             this.webcam.first_frame(Duration::from_secs(3)).await;
             this.starting.set(false);
             this.button.set_sensitive(true);
+            this.camera_row.set_sensitive(true);
             this.start_audio(staging);
         });
     }

@@ -20,7 +20,7 @@ use crate::APP_NAME;
 /// The video in a meeting folder, when a webcam was recorded.
 pub const FILE: &str = "webcam.mp4";
 
-/// The video devices, as (device, name), sorted by name.
+/// The video devices, as (device, name), sorted by name and then by node.
 pub fn devices() -> Vec<(PathBuf, String)> {
     let Ok(entries) = std::fs::read_dir("/sys/class/video4linux") else {
         return Vec::new();
@@ -32,8 +32,15 @@ pub fn devices() -> Vec<(PathBuf, String)> {
             Some((PathBuf::from("/dev").join(entry.file_name()), name.trim().to_owned()))
         })
         .collect();
-    found.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    sort(&mut found);
     found
+}
+
+/// By name, then by node number, so video9 comes before video10 and each
+/// camera starts on its first node, the one with the picture.
+fn sort(devices: &mut [(PathBuf, String)]) {
+    let node = |device: &PathBuf| device.to_str()?.strip_prefix("/dev/video")?.parse::<u32>().ok();
+    devices.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| node(&a.0).cmp(&node(&b.0))));
 }
 
 /// The cameras to choose from: each name once, on its first device (a camera
@@ -488,6 +495,18 @@ mod tests {
         let offered: Vec<_> = cameras(&devices).into_iter().map(|(d, _)| d).collect();
         assert_eq!(offered, [PathBuf::from("/dev/video0"), PathBuf::from("/dev/video4")]);
         assert_eq!(pick(&devices, "Opal C1").map(|d| d.0), Some(PathBuf::from("/dev/video4")));
+    }
+
+    #[test]
+    fn video9_comes_before_video10() {
+        let mut devices = vec![
+            (PathBuf::from("/dev/video10"), "Opal C1".to_owned()),
+            (PathBuf::from("/dev/video9"), "Opal C1".to_owned()),
+            (PathBuf::from("/dev/video2"), "Laptop camera".to_owned()),
+        ];
+        sort(&mut devices);
+        let offered: Vec<_> = cameras(&devices).into_iter().map(|(d, _)| d).collect();
+        assert_eq!(offered, [PathBuf::from("/dev/video2"), PathBuf::from("/dev/video9")]);
     }
 
     #[test]
