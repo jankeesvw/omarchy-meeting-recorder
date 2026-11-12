@@ -1,12 +1,13 @@
 //! Remembered preferences: the audio format, the transcription language,
-//! the webcam, the name you go by in transcripts and whether the bar widget
-//! was offered.
+//! the webcam, how much the transcribing page moves, the name you go by in
+//! transcripts and whether the bar widget was offered.
 
 use std::path::PathBuf;
 
 use gtk::glib;
 
 use crate::APP_NAME;
+use crate::animation::Motion;
 use crate::export::Format;
 use crate::transcribe::LANGUAGES;
 
@@ -35,6 +36,18 @@ fn save(key: &str, value: &str) {
         let _ = std::fs::create_dir_all(dir);
     }
     let _ = std::fs::write(path, settings.to_string());
+}
+
+/// How much the transcribing page moves.
+pub fn load_motion() -> Motion {
+    load()["motion"]
+        .as_str()
+        .map(Motion::from_key)
+        .unwrap_or_default()
+}
+
+pub fn save_motion(motion: Motion) {
+    save("motion", motion.key());
 }
 
 pub fn load_format() -> Format {

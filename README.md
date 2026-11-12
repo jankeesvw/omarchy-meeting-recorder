@@ -72,6 +72,8 @@ The bar widget shows the same while you record: a pulsing dot, a small waveform 
 
 When you stop, the window switches straight to the transcribing animation: it saves the audio, then [whisper-rs](https://github.com/tazz4843/whisper-rs) transcribes the meeting, and the lines type themselves out with the speakers' names as they are recognised. It ends on 100% and DONE, and stays at least ten seconds, also for a short recording. Nothing is sent anywhere.
 
+The animation is drawn on the CPU, about a quarter of a core while it is on screen. **While transcribing** on the start screen picks how much it moves: **Full animation**, **Minimal** (the scene as a still frame, only the progress and the lines change) or **No animation** (the progress and the lines on a plain background). Both of the last two cost next to nothing. With animations off in GTK (`gsettings set org.gnome.desktop.interface enable-animations false`), Full animation shows the still frame too.
+
 <p align="center"><img src="screenshots/transcribing.webp" alt="The transcribing animation at 77 percent with lines from Maya and Tom" width="440"></p>
 
 ### Imports any recording

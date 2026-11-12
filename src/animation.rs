@@ -15,6 +15,45 @@ use gtk::prelude::*;
 
 type Rgb = (f64, f64, f64);
 
+/// How much the transcribing page moves, a setting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Motion {
+    /// The scene, animated.
+    #[default]
+    Full,
+    /// The scene as a still frame; only the bar, the stage and the lines change.
+    Minimal,
+    /// No scene: the title, the bar and the lines on a plain background.
+    Off,
+}
+
+impl Motion {
+    pub const ALL: [Motion; 3] = [Motion::Full, Motion::Minimal, Motion::Off];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Motion::Full => "full",
+            Motion::Minimal => "minimal",
+            Motion::Off => "off",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Motion::Full => "Full animation",
+            Motion::Minimal => "Minimal",
+            Motion::Off => "No animation",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Motion {
+        Motion::ALL
+            .into_iter()
+            .find(|m| m.key() == key)
+            .unwrap_or_default()
+    }
+}
+
 const fn rgb(r: u8, g: u8, b: u8) -> Rgb {
     (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0)
 }
@@ -90,6 +129,10 @@ struct Model {
     lines: Vec<String>,
     line_started: f64,
     running: bool,
+    motion: Motion,
+    /// Not animating, by the setting or GTK's: frames are drawn only when the
+    /// progress, the stage or the transcript changes.
+    still: bool,
     start_time: Option<i64>,
     now: f64,
     tick: Option<gtk::TickCallbackId>,
@@ -136,12 +179,22 @@ impl TranscribeAnimation {
 
     /// Overall progress from 0.0 to 1.0.
     pub fn set_progress(&self, progress: f64) {
-        self.model.borrow_mut().progress = progress.clamp(0.0, 1.0);
+        let mut m = self.model.borrow_mut();
+        let percent = |p: f64| (p * 100.0).round();
+        let shown = percent(m.progress);
+        m.progress = progress.clamp(0.0, 1.0);
+        let moved = percent(m.progress) != shown;
+        drop(m);
+        // The page shows whole percents; a smaller step changes nothing on it.
+        if moved {
+            self.changed();
+        }
     }
 
     /// A short label for what is happening, e.g. "Loading model" or "Transcribing you".
     pub fn set_stage(&self, stage: &str) {
         self.model.borrow_mut().stage = stage.to_owned();
+        self.changed();
     }
 
     /// A freshly transcribed line; it types itself out.
@@ -153,6 +206,8 @@ impl TranscribeAnimation {
         }
         m.lines.push(line.to_owned());
         m.line_started = m.now;
+        drop(m);
+        self.changed();
     }
 
     /// Clears the lines and the progress, for a new run.
@@ -162,6 +217,26 @@ impl TranscribeAnimation {
         m.progress = 0.0;
         m.shown_progress = 0.0;
         m.stage.clear();
+        drop(m);
+        self.changed();
+    }
+
+    /// Without the frame clock, shows what changed at once: the bar at its
+    /// value and the newest line typed out in full.
+    fn changed(&self) {
+        let mut m = self.model.borrow_mut();
+        if !m.still {
+            return;
+        }
+        m.shown_progress = m.progress;
+        m.line_started = m.now - TYPED_OUT;
+        drop(m);
+        self.area.queue_draw();
+    }
+
+    /// How much the page moves from the next start on.
+    pub fn set_motion(&self, motion: Motion) {
+        self.model.borrow_mut().motion = motion;
     }
 
     /// Starts or stops the frame clock; stopped, it costs nothing.
@@ -171,6 +246,13 @@ impl TranscribeAnimation {
             return;
         }
         m.running = running;
+        m.still = running && (m.motion != Motion::Full || !animations_enabled());
+        if m.still {
+            m.now = STILL_TIME;
+            drop(m);
+            self.changed();
+            return;
+        }
         if running {
             m.start_time = None;
             let model = self.model.clone();
@@ -223,6 +305,18 @@ fn grain(seed: u64) -> ImageSurface {
 /// 30 frames a second: the scene moves slowly, and every frame is drawn on the CPU.
 const FRAME_INTERVAL_US: i64 = 1_000_000 / 30;
 
+/// The moment the still frame shows: the title decrypted and not glitching.
+const STILL_TIME: f64 = 2.5;
+
+/// Seconds after which the newest line is typed out and has slid into place.
+const TYPED_OUT: f64 = 3600.0;
+
+/// GTK's switch for animations, which desktops set to reduce motion; with it
+/// off, `Motion::Full` shows the still frame.
+fn animations_enabled() -> bool {
+    gtk::Settings::default().is_none_or(|settings| settings.is_gtk_enable_animations())
+}
+
 fn set(cr: &Context, c: Rgb, alpha: f64) {
     cr.set_source_rgba(c.0, c.1, c.2, alpha);
 }
@@ -233,6 +327,11 @@ fn draw(cr: &Context, w: f64, h: f64, m: &mut Model) {
 
     set(cr, dark(), 1.0);
     let _ = cr.paint();
+    if m.motion == Motion::Off {
+        title(cr, w, h, t);
+        hud(cr, w, h, horizon, m);
+        return;
+    }
 
     // Everything neon is drawn small and blown up for the bloom, a tight pass
     // and a wide one, and then once more crisp on top.

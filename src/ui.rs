@@ -13,7 +13,7 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 
 use crate::agent::{self, Agent};
-use crate::animation::TranscribeAnimation;
+use crate::animation::{Motion, TranscribeAnimation};
 use crate::audio::{HISTORY, Source, to_meter};
 use crate::chapters::{self, Chapter};
 use crate::export::{self, Format, export_audio, export_tracks};
@@ -538,6 +538,19 @@ impl Recorder {
             .active(webcam_camera.is_some() && settings::load_webcam_on())
             .sensitive(webcam_camera.is_some())
             .build();
+        let motion_labels: Vec<&str> = Motion::ALL.iter().map(|m| m.label()).collect();
+        let motion_row = adw::ComboRow::builder()
+            .title("While transcribing")
+            .subtitle("The animation is drawn on the CPU")
+            .model(&gtk::StringList::new(&motion_labels))
+            .build();
+        let saved = settings::load_motion();
+        motion_row.set_selected(Motion::ALL.iter().position(|m| *m == saved).unwrap_or(0) as u32);
+        motion_row.connect_selected_notify(|row| {
+            if let Some(motion) = Motion::ALL.get(row.selected() as usize) {
+                settings::save_motion(*motion);
+            }
+        });
         let webcam_preview = gtk::Picture::builder()
             .content_fit(gtk::ContentFit::Cover)
             .width_request(96)
@@ -561,6 +574,7 @@ impl Recorder {
         group.add(&format_row);
         group.add(&language_row);
         group.add(&webcam_row);
+        group.add(&motion_row);
         content.append(&group);
 
         let frozen: [Frozen; 2] = Default::default();
@@ -2188,6 +2202,7 @@ impl Recorder {
         self.animation_since.set(Some(std::time::Instant::now()));
         self.animation.reset();
         self.animation.set_stage("Importing audio");
+        self.animation.set_motion(settings::load_motion());
         self.animation.set_running(true);
         self.set_state(State::Stopping);
 
@@ -2514,6 +2529,7 @@ impl Recorder {
         // Straight to the animation: the waves would suggest it is still recording.
         self.animation.reset();
         self.animation.set_stage("Saving audio");
+        self.animation.set_motion(settings::load_motion());
         self.animation.set_running(true);
         self.set_state(State::Stopping);
 
@@ -2594,6 +2610,7 @@ impl Recorder {
         self.animation.reset();
         self.animation.set_stage("Loading audio");
         self.animation.set_progress(0.0);
+        self.animation.set_motion(settings::load_motion());
         self.animation.set_running(true);
 
         let abort = Abort::default();
