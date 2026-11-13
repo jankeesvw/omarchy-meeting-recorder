@@ -18,6 +18,7 @@ use std::time::Instant;
 use gtk::glib;
 use whisper_rs::{
     DtwMode, DtwParameters, FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters,
+    WhisperState,
 };
 
 use crate::APP_NAME;
@@ -1091,20 +1092,7 @@ fn run_whisper(
     abort: &Abort,
 ) -> Result<(Vec<Word>, Option<String>), String> {
     let mut state = context.create_state().map_err(|e| e.to_string())?;
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-    params.set_n_threads(threads.min(16) as i32);
-    params.set_language(Some(language));
-    params.set_print_special(false);
-    params.set_print_progress(false);
-    params.set_print_realtime(false);
-    params.set_print_timestamps(false);
-    params.set_suppress_blank(true);
-    params.set_suppress_nst(true);
-    params.set_no_speech_thold(0.6);
-    // Word times, so a segment can be split where the speaker changes.
-    params.set_token_timestamps(true);
-    params.set_split_on_word(true);
+    let mut params = whisper_params(language, abort);
 
     let progress_events = events.clone();
     params.set_progress_callback_safe(move |pct: i32| {
@@ -1133,13 +1121,6 @@ fn run_whisper(
         );
     });
 
-    // Passed as a boxed trait object on purpose: whisper-rs 0.16 casts the user
-    // data back to `F`, which only matches what it stored when F is this Box.
-    let abort_flag = abort.clone();
-    let should_abort: Box<dyn FnMut() -> bool> =
-        Box::new(move || abort_flag.load(Ordering::Relaxed));
-    params.set_abort_callback_safe::<_, Box<dyn FnMut() -> bool>>(Some(should_abort));
-
     let result = state.full(params, &glued.samples);
     if abort.load(Ordering::Relaxed) {
         return Err(CANCELLED.into());
@@ -1149,7 +1130,70 @@ fn run_whisper(
     let detected = whisper_rs::get_lang_str(state.full_lang_id_from_state()).map(str::to_owned);
     let eot = context.token_eot();
     let mut words: Vec<Word> = Vec::new();
-    for (index, segment) in state.as_iter().enumerate() {
+    let mut lines = Vec::new();
+    read_words(&state, eot, 0, 0, &mut words, &mut lines);
+
+    let loops = looping_runs(&lines);
+    if !loops.is_empty() {
+        emit(events, Event::Stage("Rechecking repeated lines".into()));
+        words = retry_loops(context, glued, language, words, &lines, &loops, abort)?;
+    }
+    Ok((words, detected))
+}
+
+/// The decoding settings every whisper run here shares.
+fn whisper_params<'a>(language: &'a str, abort: &Abort) -> FullParams<'a, 'a> {
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    params.set_n_threads(threads.min(16) as i32);
+    params.set_language(Some(language));
+    params.set_print_special(false);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    params.set_suppress_blank(true);
+    params.set_suppress_nst(true);
+    params.set_no_speech_thold(0.6);
+    // Word times, so a segment can be split where the speaker changes.
+    params.set_token_timestamps(true);
+    params.set_split_on_word(true);
+
+    // Passed as a boxed trait object on purpose: whisper-rs 0.16 casts the user
+    // data back to `F`, which only matches what it stored when F is this Box.
+    let abort_flag = abort.clone();
+    let should_abort: Box<dyn FnMut() -> bool> =
+        Box::new(move || abort_flag.load(Ordering::Relaxed));
+    params.set_abort_callback_safe::<_, Box<dyn FnMut() -> bool>>(Some(should_abort));
+    params
+}
+
+/// A whisper segment as plain text with its times in the glued buffer.
+struct Line {
+    text: String,
+    start_ms: i64,
+    end_ms: i64,
+}
+
+/// The words of every segment in `state`, moved by `offset_ms` and numbered
+/// from `first_segment` on, plus each segment as a line.
+fn read_words(
+    state: &WhisperState,
+    eot: i32,
+    offset_ms: i64,
+    first_segment: usize,
+    words: &mut Vec<Word>,
+    lines: &mut Vec<Line>,
+) {
+    for (n, segment) in state.as_iter().enumerate() {
+        let index = first_segment + n;
+        lines.push(Line {
+            text: segment
+                .to_str_lossy()
+                .map(|t| t.trim().to_owned())
+                .unwrap_or_default(),
+            start_ms: segment.start_timestamp() * 10 + offset_ms,
+            end_ms: segment.end_timestamp() * 10 + offset_ms,
+        });
         let no_speech = segment.no_speech_probability();
         // Bytes first: a character can be split over two tokens.
         let mut current: Option<(Vec<u8>, i64, i64)> = None;
@@ -1184,20 +1228,138 @@ fn run_whisper(
             } else {
                 (data.t0 * 10, data.t1 * 10)
             };
+            let (t0, t1) = (t0 + offset_ms, t1 + offset_ms);
             match current.as_mut() {
                 Some((word, _, end)) if !bytes.starts_with(b" ") => {
                     word.extend_from_slice(bytes);
                     *end = t1.max(*end);
                 }
                 _ => {
-                    flush(&mut current, &mut words);
+                    flush(&mut current, words);
                     current = Some((bytes.to_vec(), t0, t1));
                 }
             }
         }
-        flush(&mut current, &mut words);
+        flush(&mut current, words);
     }
-    Ok((words, detected))
+}
+
+/// A sentence repeated this often in a row is whisper stuck in a loop, not
+/// someone repeating themselves.
+const LOOP_REPEATS: usize = 4;
+
+/// Runs of whisper segments (first..=last) where one sentence repeats
+/// `LOOP_REPEATS` times or more in a row. Whisper feeds its own text back in
+/// as context for the next window, so once it has made a line up, it can keep
+/// writing that line for minutes, over real speech.
+fn looping_runs(lines: &[Line]) -> Vec<(usize, usize)> {
+    let mut sentences: Vec<(String, usize)> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        for sentence in line.text.split_inclusive(['.', '?', '!', '\u{2026}']) {
+            let key = normalize(sentence);
+            if !key.is_empty() {
+                sentences.push((key, index));
+            }
+        }
+    }
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < sentences.len() {
+        let mut j = i + 1;
+        while j < sentences.len() && sentences[j].0 == sentences[i].0 {
+            j += 1;
+        }
+        if j - i >= LOOP_REPEATS {
+            let (first, last) = (sentences[i].1, sentences[j - 1].1);
+            match runs.last_mut() {
+                Some(run) if first <= run.1 + 1 => run.1 = run.1.max(last),
+                _ => runs.push((first, last)),
+            }
+        }
+        i = j;
+    }
+    runs
+}
+
+/// How many sentences sit in loops.
+fn looped_sentences(lines: &[Line]) -> usize {
+    let mut sentences: Vec<String> = Vec::new();
+    for line in lines {
+        sentences.extend(
+            line.text
+                .split_inclusive(['.', '?', '!', '\u{2026}'])
+                .map(normalize)
+                .filter(|s| !s.is_empty()),
+        );
+    }
+    sentences
+        .chunk_by(|a, b| a == b)
+        .filter(|run| run.len() >= LOOP_REPEATS)
+        .map(<[String]>::len)
+        .sum()
+}
+
+/// Lower case letters and digits, single spaces.
+fn normalize(text: &str) -> String {
+    let kept: String = text
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect();
+    kept.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Whisper once more over each looping stretch, this time without the text
+/// before it as context, which is what keeps a loop going. The new words
+/// replace the old ones when they loop less.
+fn retry_loops(
+    context: &WhisperContext,
+    glued: &Glued,
+    language: &str,
+    mut words: Vec<Word>,
+    lines: &[Line],
+    loops: &[(usize, usize)],
+    abort: &Abort,
+) -> Result<Vec<Word>, String> {
+    let eot = context.token_eot();
+    let mut next_segment = lines.len();
+    for &(first, last) in loops {
+        let start_ms = lines[first].start_ms;
+        let end_ms = lines[last].end_ms;
+        let start = ms_to_sample(start_ms).min(glued.samples.len());
+        let end = ms_to_sample(end_ms).min(glued.samples.len());
+        if end <= start {
+            continue;
+        }
+
+        let mut state = context.create_state().map_err(|e| e.to_string())?;
+        let mut params = whisper_params(language, abort);
+        params.set_n_max_text_ctx(0);
+        let result = state.full(params, &glued.samples[start..end]);
+        if abort.load(Ordering::Relaxed) {
+            return Err(CANCELLED.into());
+        }
+        result.map_err(|e| e.to_string())?;
+
+        let mut new_words = Vec::new();
+        let mut new_lines = Vec::new();
+        read_words(
+            &state,
+            eot,
+            start_ms,
+            next_segment,
+            &mut new_words,
+            &mut new_lines,
+        );
+        if looped_sentences(&new_lines) >= looped_sentences(&lines[first..=last]) {
+            continue;
+        }
+        next_segment += new_lines.len();
+        words.retain(|word| word.segment < first || word.segment > last);
+        let at = words.partition_point(|word| word.start_ms < start_ms);
+        words.splice(at..at, new_words);
+    }
+    Ok(words)
 }
 
 /// A pause longer than this starts a new paragraph, even for the same speaker.
@@ -1605,6 +1767,73 @@ mod tests {
             .iter()
             .flat_map(|level| (0..FRAME).map(move |i| if i % 2 == 0 { *level } else { -*level }))
             .collect()
+    }
+
+    fn lines(texts: &[&str]) -> Vec<Line> {
+        texts
+            .iter()
+            .enumerate()
+            .map(|(i, text)| Line {
+                text: (*text).into(),
+                start_ms: i as i64 * 5000,
+                end_ms: i as i64 * 5000 + 5000,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_sentence_repeated_across_segments_is_a_loop() {
+        let lines = lines(&[
+            "Die Antwort auf die Frage 6.",
+            "A3 antwortet mit 5. A3 antwortet mit 5.",
+            "A3 antwortet mit 5. A3 antwortet mit 5.",
+            "A3 antwortet mit 5.",
+            "Einzelnen Beleg bearbeiten.",
+        ]);
+        assert_eq!(looping_runs(&lines), [(1, 3)]);
+        assert_eq!(looped_sentences(&lines), 5);
+    }
+
+    #[test]
+    fn a_loop_inside_one_segment_is_found() {
+        let lines = lines(&[
+            "Insgesamt bin ich zuversichtlich. Muss ich gucken. Muss ich gucken. \
+             Muss ich gucken. Muss ich gucken. Hat er nicht direkt so beantwortet.",
+            "Ja, doch.",
+        ]);
+        assert_eq!(looping_runs(&lines), [(0, 0)]);
+    }
+
+    #[test]
+    fn saying_something_twice_or_thrice_is_not_a_loop() {
+        let lines = lines(&[
+            "Frage drei, Führung. Frage drei, Führung.",
+            "Ja. Ja. Ja.",
+            "Thank you. Bye.",
+        ]);
+        assert!(looping_runs(&lines).is_empty());
+        assert_eq!(looped_sentences(&lines), 0);
+    }
+
+    #[test]
+    fn case_and_punctuation_do_not_hide_a_loop() {
+        let lines = lines(&[
+            "Untertitelung des ZDF, 2020.",
+            "untertitelung des ZDF 2020!",
+            "Untertitelung des ZDF, 2020.",
+            "Untertitelung des ZDF, 2020.",
+        ]);
+        assert_eq!(looping_runs(&lines), [(0, 3)]);
+    }
+
+    #[test]
+    fn separate_loops_stay_separate() {
+        let lines = lines(&[
+            "Eins. Eins. Eins. Eins.",
+            "Hier wird normal gesprochen.",
+            "Zwei. Zwei. Zwei. Zwei.",
+        ]);
+        assert_eq!(looping_runs(&lines), [(0, 0), (2, 2)]);
     }
 
     #[test]
