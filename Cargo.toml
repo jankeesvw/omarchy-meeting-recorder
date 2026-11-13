@@ -20,3 +20,9 @@ default = ["vulkan"]
 # GPU transcription through whisper.cpp's Vulkan backend. Needs the Vulkan
 # headers (`vulkan-headers` on Arch) and glslc (`shaderc`) to build.
 vulkan = ["whisper-rs/vulkan"]
+
+# whisper.cpp aborted in its word timing (median_filter) on some recordings (#39).
+# The fix is merged in whisper.cpp (ggml-org/whisper.cpp#4096) but not in a
+# whisper-rs release yet; this is whisper-rs-sys 0.15.0 with only that fix.
+[patch.crates-io]
+whisper-rs-sys = { git = "https://github.com/Somnius/whisper-rs-sys", rev = "a11d7719a15a452e13e375284114c138726a36b1" }
