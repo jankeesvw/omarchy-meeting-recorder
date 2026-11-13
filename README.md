@@ -64,7 +64,7 @@ Press Ctrl+M, or the button in the header bar, and the window shrinks to a strip
 
 <p align="center"><img src="screenshots/compact.webp" alt="The compact strip: a red dot, the elapsed time, two small waves and an expand button" width="420"></p>
 
-The bar widget shows the same while you record: a pulsing dot, a small waveform with the mic above the line and the computer audio below it, and the time. Paused it says "paused 01:23", and while the meeting is transcribed it shows the progress. Clicking it brings the recorder window back.
+The bar widget shows the same while you record: a pulsing dot, a small waveform with the mic above the line and the computer audio below it, and the time. Paused it says "paused 01:23", and while the meeting is transcribed it shows the progress. Clicking it brings the recorder window back. If you keep the recorder window in view anyway, turn off **Live waveform** in the widget's settings: the widget then shows a steady dot and the time, and the bar no longer redraws twenty times a second while you record.
 
 <p align="center"><img src="screenshots/bar-widget.webp" alt="The bar widget recording, paused and transcribing" width="600"></p>
 
