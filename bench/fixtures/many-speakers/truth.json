@@ -1,0 +1,265 @@
+{
+ "kind": "call",
+ "about": "You on a headset and ten people on the other side, each with a few turns.",
+ "truth": [
+  {
+   "speaker": "You",
+   "side": "mic",
+   "start": 0.5,
+   "end": 9.01,
+   "text": "Morning everyone. We have a full call today, so let's go around quickly. One update each, and keep it short please."
+  },
+  {
+   "speaker": "Anna",
+   "side": "computer",
+   "start": 9.61,
+   "end": 16.36,
+   "text": "I can start. The theme picker beta is out, and switching themes now takes under a second on every laptop we tried."
+  },
+  {
+   "speaker": "Ben",
+   "side": "computer",
+   "start": 16.86,
+   "end": 23.71,
+   "text": "Nice work. I finished the new keyboard layout screen in the installer. It asks one question now instead of three."
+  },
+  {
+   "speaker": "Carla",
+   "side": "computer",
+   "start": 24.21,
+   "end": 31.03,
+   "text": "On my side the wallpaper cache is fixed. Old wallpapers no longer come back after you change the theme."
+  },
+  {
+   "speaker": "Dev",
+   "side": "computer",
+   "start": 31.53,
+   "end": 38.52,
+   "text": "I spent the week on battery life. With the new power profile the ThinkPad lasts about an hour longer when you watch video."
+  },
+  {
+   "speaker": "Emma",
+   "side": "computer",
+   "start": 39.02,
+   "end": 45.56,
+   "text": "I wrote the release notes for the next version. They are in the shared folder, please read your own section before Friday."
+  },
+  {
+   "speaker": "Finn",
+   "side": "computer",
+   "start": 46.06,
+   "end": 52.08,
+   "text": "I looked at the bug reports from the forum. Most of them are about screen sharing in the browser, and I think I know why."
+  },
+  {
+   "speaker": "Grace",
+   "side": "computer",
+   "start": 52.58,
+   "end": 58.6,
+   "text": "The documentation site has a new search box. It finds the keyboard shortcuts page much faster than before."
+  },
+  {
+   "speaker": "Hugo",
+   "side": "computer",
+   "start": 59.1,
+   "end": 65.34,
+   "text": "I tested the update on four old machines. Three were fine, and one needed a restart before the network came back."
+  },
+  {
+   "speaker": "Ines",
+   "side": "computer",
+   "start": 65.84,
+   "end": 72.34,
+   "text": "I talked to the people who make the font package. They agreed to ship the new version with the wider letters next month."
+  },
+  {
+   "speaker": "Jonas",
+   "side": "computer",
+   "start": 72.84,
+   "end": 79.18,
+   "text": "And I moved the build server to the new machine. A full build takes twelve minutes now, it used to take thirty."
+  },
+  {
+   "speaker": "You",
+   "side": "mic",
+   "start": 79.78,
+   "end": 84.75,
+   "text": "Great, thank you all. Finn, tell us more about the screen sharing problem."
+  },
+  {
+   "speaker": "Finn",
+   "side": "computer",
+   "start": 85.15,
+   "end": 91.83,
+   "text": "The browser asks the desktop for a list of windows, and we answer too slowly. After five seconds it gives up and shows nothing."
+  },
+  {
+   "speaker": "Dev",
+   "side": "computer",
+   "start": 92.23,
+   "end": 96.62,
+   "text": "That sounds like the same delay I saw when the laptop wakes up from sleep."
+  },
+  {
+   "speaker": "Finn",
+   "side": "computer",
+   "start": 97.02,
+   "end": 100.06,
+   "text": "It might be. I can send you the logs after the call."
+  },
+  {
+   "speaker": "Hugo",
+   "side": "computer",
+   "start": 100.56,
+   "end": 104.12,
+   "text": "Is that also why the network needed a restart on the old machine?"
+  },
+  {
+   "speaker": "Finn",
+   "side": "computer",
+   "start": 104.52,
+   "end": 108.99,
+   "text": "I don't think so, that one looks like a driver problem. But let's compare notes."
+  },
+  {
+   "speaker": "Anna",
+   "side": "computer",
+   "start": 109.49,
+   "end": 114.98,
+   "text": "Can I ask Ines a question about the fonts? Will the wider letters change how the theme picker looks?"
+  },
+  {
+   "speaker": "Ines",
+   "side": "computer",
+   "start": 115.38,
+   "end": 121.04,
+   "text": "A little. The labels get about two pixels wider. I can send you screenshots tomorrow morning."
+  },
+  {
+   "speaker": "Anna",
+   "side": "computer",
+   "start": 121.44,
+   "end": 125.5,
+   "text": "Please do. Then I can check if the names still fit on one line."
+  },
+  {
+   "speaker": "Grace",
+   "side": "computer",
+   "start": 126.0,
+   "end": 131.71,
+   "text": "When the fonts change, I have to update the screenshots on the documentation site as well."
+  },
+  {
+   "speaker": "Emma",
+   "side": "computer",
+   "start": 132.11,
+   "end": 134.51,
+   "text": "And I'll add a line about it to the release notes."
+  },
+  {
+   "speaker": "Carla",
+   "side": "computer",
+   "start": 135.01,
+   "end": 140.63,
+   "text": "Jonas, does the faster build server mean we can build every change, not only once a day?"
+  },
+  {
+   "speaker": "Jonas",
+   "side": "computer",
+   "start": 141.03,
+   "end": 145.7,
+   "text": "Yes, that's the plan. I want to turn that on next week, after one more test."
+  },
+  {
+   "speaker": "Ben",
+   "side": "computer",
+   "start": 146.2,
+   "end": 152.14,
+   "text": "That would help me a lot with the installer. Right now I wait a whole day to see if my change works."
+  },
+  {
+   "speaker": "Jonas",
+   "side": "computer",
+   "start": 152.54,
+   "end": 154.7,
+   "text": "I'll tell you when it's ready, Ben."
+  },
+  {
+   "speaker": "Dev",
+   "side": "computer",
+   "start": 155.2,
+   "end": 162.08,
+   "text": "One more thing about battery life. I need two volunteers with older laptops to test the new profile for a week."
+  },
+  {
+   "speaker": "Hugo",
+   "side": "computer",
+   "start": 162.48,
+   "end": 165.89,
+   "text": "I have the old machines on my desk anyway, I can take one."
+  },
+  {
+   "speaker": "Carla",
+   "side": "computer",
+   "start": 166.29,
+   "end": 167.92,
+   "text": "I can take the other one."
+  },
+  {
+   "speaker": "Dev",
+   "side": "computer",
+   "start": 168.32,
+   "end": 171.94,
+   "text": "Perfect, thank you both. I'll send the steps by email."
+  },
+  {
+   "speaker": "Grace",
+   "side": "computer",
+   "start": 172.44,
+   "end": 178.91,
+   "text": "Before we finish, can everyone check that their part of the documentation is still correct? It only takes ten minutes."
+  },
+  {
+   "speaker": "Emma",
+   "side": "computer",
+   "start": 179.31,
+   "end": 182.51,
+   "text": "Good idea, I'll put a reminder in the release notes checklist."
+  },
+  {
+   "speaker": "You",
+   "side": "mic",
+   "start": 183.11,
+   "end": 192.47,
+   "text": "Okay. Finn sends the logs to Dev, Ines sends the screenshots to Anna, and Jonas turns on the builds next week. Anything else?"
+  },
+  {
+   "speaker": "Ben",
+   "side": "computer",
+   "start": 192.87,
+   "end": 193.92,
+   "text": "Nothing from me."
+  },
+  {
+   "speaker": "Ines",
+   "side": "computer",
+   "start": 194.22,
+   "end": 195.03,
+   "text": "All good here."
+  },
+  {
+   "speaker": "Jonas",
+   "side": "computer",
+   "start": 195.33,
+   "end": 195.99,
+   "text": "Same."
+  },
+  {
+   "speaker": "You",
+   "side": "mic",
+   "start": 196.49,
+   "end": 199.67,
+   "text": "Then thanks everyone, see you next week."
+  }
+ ]
+}

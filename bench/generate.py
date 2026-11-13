@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Generates the synthetic test cases in bench/fixtures from bench/scripts.
 
-    bench/generate.py <piper-voices-dir>
+    bench/generate.py <piper-voices-dir> [case ...]
 
 Needs piper-tts and ffmpeg, and these voices from
 https://huggingface.co/rhasspy/piper-voices (all public domain or CC0):
 en_US-joe-medium, en_US-john-medium, en_US-kristin-medium,
-en_US-norman-medium, en_GB-cori-medium.
+en_US-norman-medium, en_GB-cori-medium. The `many-speakers` case uses the
+18 speakers of en_US-arctic-medium instead (CMU Arctic, free for any use
+with its copyright notice kept, see bench/README.md).
+
+Name cases to make only those; without any, all are made.
 
 A script line is `speaker|gap|text`, gap being seconds after the previous
 line ends (negative: they start before the other is done). The fixtures are
@@ -16,6 +20,7 @@ import array
 import json
 import math
 import random
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -34,6 +39,10 @@ VOICES = {
     "Norman": "en_US-norman-medium",
     "Cori": "en_GB-cori-medium",
 }
+# A call with eleven people, for the speaker list (#46): one multi-speaker
+# model, `model#speaker`.
+MANY = {"You": "rms", "Anna": "slt", "Ben": "awb", "Carla": "clb", "Dev": "ksp", "Emma": "ljm",
+        "Finn": "jmk", "Grace": "lnh", "Hugo": "bdl", "Ines": "axb", "Jonas": "aup"}
 # People in the room with you are on the mic; everyone else on the computer audio.
 LOCAL = {"You", "Dave"}
 # Not everyone is equally loud on a call.
@@ -43,8 +52,13 @@ GAIN = {"You": 0.8, "Dave": 0.55, "Anna": 0.9, "Ben": 0.7, "Carla": 1.0,
 
 def synth(voices: Path, voice: str, text: str, tmp: Path) -> list[float]:
     out = tmp / "line.wav"
-    subprocess.run(["piper-tts", "--model", str(voices / f"{voice}.onnx"), "--output_file", str(out)],
-                   input=text.encode(), check=True, capture_output=True)
+    model, _, speaker = voice.partition("#")
+    config = json.load(open(voices / f"{model}.onnx.json"))
+    piper = shutil.which("piper-tts") or "piper"  # the command's name differs between releases
+    command = [piper, "--model", str(voices / f"{model}.onnx"), "--output_file", str(out)]
+    if speaker:
+        command += ["--speaker", str(config["speaker_id_map"][speaker])]
+    subprocess.run(command, input=text.encode(), check=True, capture_output=True)
     with wave.open(str(out)) as w:
         assert w.getframerate() == RATE, voice
         a = array.array("h")
@@ -52,11 +66,11 @@ def synth(voices: Path, voice: str, text: str, tmp: Path) -> list[float]:
     return [x / 32768 for x in a]
 
 
-def render(voices: Path, script: str, tmp: Path):
+def render(voices: Path, script: str, tmp: Path, cast: dict = VOICES):
     lines = [l.rstrip("\n").split("|", 2) for l in open(HERE / "scripts" / script) if l.strip()]
     clips, prev_end = [], 0.0
     for who, gap, text in lines:
-        samples = synth(voices, VOICES[who], text, tmp)
+        samples = synth(voices, cast[who], text, tmp)
         start = max(0.0, prev_end + float(gap))
         clips.append((who, start, samples, text))
         prev_end = max(prev_end, start + len(samples) / RATE)
@@ -66,7 +80,7 @@ def render(voices: Path, script: str, tmp: Path):
         at = int(start * RATE)
         track = mic if who in LOCAL else computer
         for i, s in enumerate(samples):
-            track[at + i] += s * GAIN[who]
+            track[at + i] += s * GAIN.get(who, 0.8)
         truth.append({"speaker": who, "side": "mic" if who in LOCAL else "computer",
                       "start": round(start, 2), "end": round(start + len(samples) / RATE, 2),
                       "text": text})
@@ -124,8 +138,20 @@ def case(name: str, kind: str, about: str, truth: list, tmp: Path, **tracks):
 
 def main():
     voices = Path(sys.argv[1])
+    only = set(sys.argv[2:])
+
+    def want(*names):
+        return not only or bool(only & set(names))
+
     with tempfile.TemporaryDirectory() as t:
         tmp = Path(t)
+        if want("many-speakers"):
+            cast = {who: f"en_US-arctic-medium#{speaker}" for who, speaker in MANY.items()}
+            mic, computer, truth = render(voices, "many.txt", tmp, cast)
+            case("many-speakers", "call", "You on a headset and ten people on the other side, each with a few turns.",
+                 truth, tmp, mic=mix(mic, noise(len(mic), 0.002, 6)), computer=computer)
+        if not want("call", "call-speakers", "import", "room", "music", "silence"):
+            return
         mic, computer, truth = render(voices, "call.txt", tmp)
         hiss = noise(len(mic), 0.002, 1)
         case("call", "call", "You on a headset, three people on the other side who interrupt each other.",

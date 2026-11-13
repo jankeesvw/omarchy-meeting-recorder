@@ -1,0 +1,37 @@
+You|0.5|Morning everyone. We have a full call today, so let's go around quickly. One update each, and keep it short please.
+Anna|0.6|I can start. The theme picker beta is out, and switching themes now takes under a second on every laptop we tried.
+Ben|0.5|Nice work. I finished the new keyboard layout screen in the installer. It asks one question now instead of three.
+Carla|0.5|On my side the wallpaper cache is fixed. Old wallpapers no longer come back after you change the theme.
+Dev|0.5|I spent the week on battery life. With the new power profile the ThinkPad lasts about an hour longer when you watch video.
+Emma|0.5|I wrote the release notes for the next version. They are in the shared folder, please read your own section before Friday.
+Finn|0.5|I looked at the bug reports from the forum. Most of them are about screen sharing in the browser, and I think I know why.
+Grace|0.5|The documentation site has a new search box. It finds the keyboard shortcuts page much faster than before.
+Hugo|0.5|I tested the update on four old machines. Three were fine, and one needed a restart before the network came back.
+Ines|0.5|I talked to the people who make the font package. They agreed to ship the new version with the wider letters next month.
+Jonas|0.5|And I moved the build server to the new machine. A full build takes twelve minutes now, it used to take thirty.
+You|0.6|Great, thank you all. Finn, tell us more about the screen sharing problem.
+Finn|0.4|The browser asks the desktop for a list of windows, and we answer too slowly. After five seconds it gives up and shows nothing.
+Dev|0.4|That sounds like the same delay I saw when the laptop wakes up from sleep.
+Finn|0.4|It might be. I can send you the logs after the call.
+Hugo|0.5|Is that also why the network needed a restart on the old machine?
+Finn|0.4|I don't think so, that one looks like a driver problem. But let's compare notes.
+Anna|0.5|Can I ask Ines a question about the fonts? Will the wider letters change how the theme picker looks?
+Ines|0.4|A little. The labels get about two pixels wider. I can send you screenshots tomorrow morning.
+Anna|0.4|Please do. Then I can check if the names still fit on one line.
+Grace|0.5|When the fonts change, I have to update the screenshots on the documentation site as well.
+Emma|0.4|And I'll add a line about it to the release notes.
+Carla|0.5|Jonas, does the faster build server mean we can build every change, not only once a day?
+Jonas|0.4|Yes, that's the plan. I want to turn that on next week, after one more test.
+Ben|0.5|That would help me a lot with the installer. Right now I wait a whole day to see if my change works.
+Jonas|0.4|I'll tell you when it's ready, Ben.
+Dev|0.5|One more thing about battery life. I need two volunteers with older laptops to test the new profile for a week.
+Hugo|0.4|I have the old machines on my desk anyway, I can take one.
+Carla|0.4|I can take the other one.
+Dev|0.4|Perfect, thank you both. I'll send the steps by email.
+Grace|0.5|Before we finish, can everyone check that their part of the documentation is still correct? It only takes ten minutes.
+Emma|0.4|Good idea, I'll put a reminder in the release notes checklist.
+You|0.6|Okay. Finn sends the logs to Dev, Ines sends the screenshots to Anna, and Jonas turns on the builds next week. Anything else?
+Ben|0.4|Nothing from me.
+Ines|0.3|All good here.
+Jonas|0.3|Same.
+You|0.5|Then thanks everyone, see you next week.

@@ -23,6 +23,7 @@ Only Python's standard library is needed, plus ffmpeg for the AMI download. The 
 | `room` | Two people share your mic, two people on the other side |
 | `music` | The other side talks with music playing in the background |
 | `import` | The `call` as one mixed file, as if dropped on the app |
+| `many-speakers` | You on a headset and ten people on the other side, each with a few turns, so the done page has a long speaker list (#46) |
 | `silence` | Twenty seconds of room noise: the transcript must be empty |
 | `noisy-mic` | `call` with the mic's noise floor at about −32 dBFS under speech peaking near −17 dBFS, like a cheap or onboard mic (#27) |
 | `silent-mic` | `call` with nobody speaking on your side: the mic only hears room noise at about −38 dBFS, and no line may be yours (`invented` stays 0) |
@@ -50,14 +51,15 @@ Every pull request and every push to main runs the bench with `--ami --model sma
 
 ## Making new cases
 
-The fixtures are generated from the scripts in `scripts/`, meetings of a small team working on Omarchy, with [piper](https://github.com/OHF-Voice/piper1-gpl) voices that are in the public domain or CC0 (Joe, John, Kristin, Norman and Cori from [piper-voices](https://huggingface.co/rhasspy/piper-voices)):
+The fixtures are generated from the scripts in `scripts/`, meetings of a small team working on Omarchy, with [piper](https://github.com/OHF-Voice/piper1-gpl) voices that are in the public domain or CC0 (Joe, John, Kristin, Norman and Cori from [piper-voices](https://huggingface.co/rhasspy/piper-voices)); `many-speakers` uses eleven of the eighteen speakers in `en_US-arctic-medium`:
 
 ```bash
 bench/generate.py ~/path/to/piper-voices
+bench/generate.py ~/path/to/piper-voices many-speakers   # only some cases
 ```
 
 A script line is `speaker|gap|text`, where the gap is the seconds after the previous line ends; a negative gap makes them talk at the same time. The generated files are committed, so running the bench does not need piper.
 
 ## Licenses
 
-The generated fixtures are CC0. AMI is © the AMI Consortium, [CC BY 4.0](https://groups.inf.ed.ac.uk/ami/corpus/license.shtml); its speaker annotations come from [pyannote/AMI-diarization-setup](https://github.com/pyannote/AMI-diarization-setup). Neither is stored in this repository: `--ami` downloads them to `bench/.cache/`.
+The generated fixtures are CC0, except `many-speakers`: its voices are piper's `en_US-arctic-medium`, trained on the [CMU Arctic](http://www.festvox.org/cmu_arctic/) databases, © 2003 Carnegie Mellon University, free for any use as long as that copyright notice and the authors' names are kept. AMI is © the AMI Consortium, [CC BY 4.0](https://groups.inf.ed.ac.uk/ami/corpus/license.shtml); its speaker annotations come from [pyannote/AMI-diarization-setup](https://github.com/pyannote/AMI-diarization-setup). Neither is stored in this repository: `--ami` downloads them to `bench/.cache/`.
