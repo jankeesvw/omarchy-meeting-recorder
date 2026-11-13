@@ -86,7 +86,7 @@ Drop an audio file on the window, or click **Import an audio file**: a phone mem
 
 The done screen puts the transcript on the right: the time, the speaker and the text in their own columns, one paragraph per turn. Above it sits a player with a waveform of both sides, your side above the line and the other side below it. Click or drag in the waveform to seek, or click any line to play from there. The line that is playing is highlighted and the transcript scrolls along.
 
-On the left: the meeting name and one row per speaker, which you can rename at any time (the folder, the transcript and the manifest follow, and your own name is remembered for next time; give two speakers the same name and they become one), the chapters, **Copy transcript** (also Enter), Open folder, New recording, and the language to transcribe again in.
+On the left: the meeting name and one row per speaker, which you can rename at any time (the folder, the transcript and the manifest follow, and your own name is remembered for next time; give two speakers the same name and they become one), the chapters, **Copy transcript** (also Enter) with the transcript above it to drag into a chat, an editor or a folder, Open folder, New recording, and the language to transcribe again in.
 
 ![The done screen while playing: the current chapter selected and the current line highlighted](screenshots/done.webp)
 
@@ -129,7 +129,8 @@ If the app quits while it records (a crash, a logout, a power cut), the next sta
 - **Keyboard.** Ctrl+M switches between the full window and the compact strip. Ctrl+N opens another window. On the done page Enter copies the transcript. Ctrl+F finds text in it: the match is marked, Enter and Shift+Enter move between matches, and Escape closes the bar. Ctrl+W closes the window and Ctrl+Q all of them, and they ask first while recording or transcribing.
 - **The name** stays editable all the time. After the transcript is done, changing it (Enter, or leaving the field) renames the meeting folder and the heading in the transcript.
 - **Closing** while recording or transcribing asks first. You can stop and close, let the transcription finish in the background and quit afterwards, or cancel the transcription; the audio is kept either way.
-- **Opening a meeting later.** Double-click its `.meeting-recorder` file, or run `omarchy-meeting-recorder <folder>`. It opens on the done page with the settings it was made with. When the window is busy recording or transcribing, the meeting opens in a window of its own.
+- **Opening a meeting later.** Press **Open meeting…** under the record button and pick its folder, double-click its `.meeting-recorder` file, or run `omarchy-meeting-recorder <folder>`. It opens on the done page with the settings it was made with. When the window is busy recording or transcribing, the meeting opens in a window of its own.
+- **Meetings.** On the done page, the list on the left is every meeting in `~/Documents/Meetings`, newest first. The one on screen is selected. Click another to open it here, or in a new window while this one is recording or transcribing. Drag one out to take its transcript along.
 - **More than one window.** Ctrl+N, `omarchy-meeting-recorder new-window` or New Window in the launcher opens another one, to read an older meeting or start the next while the last one is still transcribing. Every window shows its own meeting; one records at a time. The bar widget and the keybindings follow the window that is recording, else the one transcribing.
 - **Keybindings.** `omarchy-meeting-recorder start`, `pause`, `stop` and `compact` control the running app, so you can bind them to keys in Hyprland.
 
