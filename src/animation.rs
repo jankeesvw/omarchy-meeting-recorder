@@ -15,6 +15,45 @@ use gtk::prelude::*;
 
 type Rgb = (f64, f64, f64);
 
+/// How much the transcribing page moves, a setting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Motion {
+    /// The scene, animated.
+    #[default]
+    Full,
+    /// The scene as a still frame; only the bar, the stage and the lines change.
+    Minimal,
+    /// No scene: the title, the bar and the lines on a plain background.
+    Off,
+}
+
+impl Motion {
+    pub const ALL: [Motion; 3] = [Motion::Full, Motion::Minimal, Motion::Off];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Motion::Full => "full",
+            Motion::Minimal => "minimal",
+            Motion::Off => "off",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Motion::Full => "Full animation",
+            Motion::Minimal => "Minimal",
+            Motion::Off => "No animation",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Motion {
+        Motion::ALL
+            .into_iter()
+            .find(|m| m.key() == key)
+            .unwrap_or_default()
+    }
+}
+
 const fn rgb(r: u8, g: u8, b: u8) -> Rgb {
     (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0)
 }
@@ -90,10 +129,18 @@ struct Model {
     lines: Vec<String>,
     line_started: f64,
     running: bool,
+    motion: Motion,
+    /// Not animating, by the setting or GTK's: frames are drawn only when the
+    /// progress, the stage or the transcript changes.
+    still: bool,
     start_time: Option<i64>,
     now: f64,
     tick: Option<gtk::TickCallbackId>,
+    /// When the last frame was drawn, in frame-clock microseconds.
+    last_frame: i64,
     grain: Vec<ImageSurface>,
+    /// The vignette never moves: drawn once per size, then copied.
+    vignette: Option<ImageSurface>,
 }
 
 #[derive(Clone)]
@@ -132,12 +179,22 @@ impl TranscribeAnimation {
 
     /// Overall progress from 0.0 to 1.0.
     pub fn set_progress(&self, progress: f64) {
-        self.model.borrow_mut().progress = progress.clamp(0.0, 1.0);
+        let mut m = self.model.borrow_mut();
+        let percent = |p: f64| (p * 100.0).round();
+        let shown = percent(m.progress);
+        m.progress = progress.clamp(0.0, 1.0);
+        let moved = percent(m.progress) != shown;
+        drop(m);
+        // The page shows whole percents; a smaller step changes nothing on it.
+        if moved {
+            self.changed();
+        }
     }
 
     /// A short label for what is happening, e.g. "Loading model" or "Transcribing you".
     pub fn set_stage(&self, stage: &str) {
         self.model.borrow_mut().stage = stage.to_owned();
+        self.changed();
     }
 
     /// A freshly transcribed line; it types itself out.
@@ -149,6 +206,8 @@ impl TranscribeAnimation {
         }
         m.lines.push(line.to_owned());
         m.line_started = m.now;
+        drop(m);
+        self.changed();
     }
 
     /// Clears the lines and the progress, for a new run.
@@ -158,6 +217,26 @@ impl TranscribeAnimation {
         m.progress = 0.0;
         m.shown_progress = 0.0;
         m.stage.clear();
+        drop(m);
+        self.changed();
+    }
+
+    /// Without the frame clock, shows what changed at once: the bar at its
+    /// value and the newest line typed out in full.
+    fn changed(&self) {
+        let mut m = self.model.borrow_mut();
+        if !m.still {
+            return;
+        }
+        m.shown_progress = m.progress;
+        m.line_started = m.now - TYPED_OUT;
+        drop(m);
+        self.area.queue_draw();
+    }
+
+    /// How much the page moves from the next start on.
+    pub fn set_motion(&self, motion: Motion) {
+        self.model.borrow_mut().motion = motion;
     }
 
     /// Starts or stops the frame clock; stopped, it costs nothing.
@@ -167,6 +246,13 @@ impl TranscribeAnimation {
             return;
         }
         m.running = running;
+        m.still = running && (m.motion != Motion::Full || !animations_enabled());
+        if m.still {
+            m.now = STILL_TIME;
+            drop(m);
+            self.changed();
+            return;
+        }
         if running {
             m.start_time = None;
             let model = self.model.clone();
@@ -177,6 +263,10 @@ impl TranscribeAnimation {
                 m.now = (frame - start) as f64 / 1_000_000.0;
                 // Ease the bar towards the real value instead of jumping.
                 m.shown_progress += (m.progress - m.shown_progress) * 0.08;
+                if frame - m.last_frame < FRAME_INTERVAL_US {
+                    return glib::ControlFlow::Continue;
+                }
+                m.last_frame = frame;
                 drop(m);
                 area.queue_draw();
                 glib::ControlFlow::Continue
@@ -212,6 +302,21 @@ fn grain(seed: u64) -> ImageSurface {
     surface
 }
 
+/// 30 frames a second: the scene moves slowly, and every frame is drawn on the CPU.
+const FRAME_INTERVAL_US: i64 = 1_000_000 / 30;
+
+/// The moment the still frame shows: the title decrypted and not glitching.
+const STILL_TIME: f64 = 2.5;
+
+/// Seconds after which the newest line is typed out and has slid into place.
+const TYPED_OUT: f64 = 3600.0;
+
+/// GTK's switch for animations, which desktops set to reduce motion; with it
+/// off, `Motion::Full` shows the still frame.
+fn animations_enabled() -> bool {
+    gtk::Settings::default().is_none_or(|settings| settings.is_gtk_enable_animations())
+}
+
 fn set(cr: &Context, c: Rgb, alpha: f64) {
     cr.set_source_rgba(c.0, c.1, c.2, alpha);
 }
@@ -222,12 +327,15 @@ fn draw(cr: &Context, w: f64, h: f64, m: &mut Model) {
 
     set(cr, dark(), 1.0);
     let _ = cr.paint();
+    if m.motion == Motion::Off {
+        title(cr, w, h, t);
+        hud(cr, w, h, horizon, m);
+        return;
+    }
 
     // Everything neon is drawn small and blown up for the bloom, a tight pass
     // and a wide one, and then once more crisp on top.
-    for (bloom_scale, alpha) in [(6.0, 0.7), (16.0, 0.9)] {
-        bloom(cr, w, h, bloom_scale, alpha, |g| neon(g, w, h, horizon, t));
-    }
+    bloom(cr, w, h, |g| neon(g, w, h, horizon, t));
     neon(cr, w, h, horizon, t);
 
     title(cr, w, h, t);
@@ -235,28 +343,74 @@ fn draw(cr: &Context, w: f64, h: f64, m: &mut Model) {
     crt(cr, w, h, t, m);
 }
 
-/// Renders `paint` at 1/`scale` and paints it back up with bilinear filtering,
-/// which is a cheap blur, added on top of what is already there.
-fn bloom(cr: &Context, w: f64, h: f64, scale: f64, alpha: f64, paint: impl Fn(&Context)) {
-    let Ok(small) = ImageSurface::create(
+/// Darkens the edges; drawn once per window size.
+fn vignette(w: f64, h: f64) -> Option<ImageSurface> {
+    let surface = ImageSurface::create(Format::ARgb32, w.ceil() as i32, h.ceil() as i32).ok()?;
+    let cr = Context::new(&surface).ok()?;
+    let vignette =
+        cairo::RadialGradient::new(w / 2.0, h / 2.0, h * 0.3, w / 2.0, h / 2.0, w.max(h) * 0.75);
+    vignette.add_color_stop_rgba(0.0, 0.0, 0.0, 0.0, 0.0);
+    vignette.add_color_stop_rgba(1.0, 0.0, 0.0, 0.0, 0.55);
+    cr.set_source(&vignette).ok();
+    let _ = cr.paint();
+    drop(cr);
+    Some(surface)
+}
+
+/// Renders `paint` at 1/`scale` into a new surface.
+fn shrunk(w: f64, h: f64, scale: f64, paint: &impl Fn(&Context)) -> Option<ImageSurface> {
+    let small = ImageSurface::create(
         Format::ARgb32,
         (w / scale).ceil() as i32,
         (h / scale).ceil() as i32,
-    ) else {
-        return;
-    };
-    let Ok(g) = Context::new(&small) else { return };
+    )
+    .ok()?;
+    let g = Context::new(&small).ok()?;
     g.scale(1.0 / scale, 1.0 / scale);
     paint(&g);
     drop(g);
+    Some(small)
+}
+
+/// Adds `small`, scaled up by `scale`, onto `cr`.
+fn add_scaled(cr: &Context, small: &ImageSurface, scale: f64, alpha: f64, filter: Filter) {
     let _ = cr.save();
     cr.scale(scale, scale);
-    let pattern = SurfacePattern::create(&small);
-    pattern.set_filter(Filter::Good);
+    let pattern = SurfacePattern::create(small);
+    pattern.set_filter(filter);
     cr.set_source(&pattern).ok();
     cr.set_operator(Operator::Add);
     let _ = cr.paint_with_alpha(alpha);
     let _ = cr.restore();
+}
+
+/// The glow: `paint` rendered at 1/6 and at 1/16 and blown back up, which is a
+/// cheap blur. Smooth scaling costs per pixel it writes, so the two passes are
+/// combined while small, smoothed up to half the window and only then doubled,
+/// without smoothing, to the full size: the glow is soft enough not to show it.
+fn bloom(cr: &Context, w: f64, h: f64, paint: impl Fn(&Context)) {
+    let (Some(tight), Some(wide)) = (shrunk(w, h, 6.0, &paint), shrunk(w, h, 16.0, &paint)) else {
+        return;
+    };
+    let Ok(glow) = ImageSurface::create(Format::ARgb32, tight.width(), tight.height()) else {
+        return;
+    };
+    let Ok(g) = Context::new(&glow) else { return };
+    g.set_source_surface(&tight, 0.0, 0.0).ok();
+    let _ = g.paint_with_alpha(0.7);
+    add_scaled(&g, &wide, 16.0 / 6.0, 0.9, Filter::Good);
+    drop(g);
+    let Ok(half) = ImageSurface::create(
+        Format::ARgb32,
+        (w / 2.0).ceil() as i32,
+        (h / 2.0).ceil() as i32,
+    ) else {
+        return;
+    };
+    let Ok(g) = Context::new(&half) else { return };
+    add_scaled(&g, &glow, 3.0, 1.0, Filter::Good);
+    drop(g);
+    add_scaled(cr, &half, 2.0, 1.0, Filter::Nearest);
 }
 
 /// Sky glow, the sun of shapes and the grid: the parts that bloom.
@@ -595,7 +749,7 @@ fn rounded(cr: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
 }
 
 /// Scanlines, stepped grain, a rolling bar, vignette and a faint flicker.
-fn crt(cr: &Context, w: f64, h: f64, t: f64, m: &Model) {
+fn crt(cr: &Context, w: f64, h: f64, t: f64, m: &mut Model) {
     set(cr, (0.0, 0.0, 0.0), 0.16);
     let mut y = 0.0;
     while y < h {
@@ -627,12 +781,14 @@ fn crt(cr: &Context, w: f64, h: f64, t: f64, m: &Model) {
     cr.set_source(&band).ok();
     let _ = cr.paint();
 
-    let vignette =
-        cairo::RadialGradient::new(w / 2.0, h / 2.0, h * 0.3, w / 2.0, h / 2.0, w.max(h) * 0.75);
-    vignette.add_color_stop_rgba(0.0, 0.0, 0.0, 0.0, 0.0);
-    vignette.add_color_stop_rgba(1.0, 0.0, 0.0, 0.0, 0.55);
-    cr.set_source(&vignette).ok();
-    let _ = cr.paint();
+    let size = (w.ceil() as i32, h.ceil() as i32);
+    if m.vignette.as_ref().map(|v| (v.width(), v.height())) != Some(size) {
+        m.vignette = vignette(w, h);
+    }
+    if let Some(vignette) = &m.vignette {
+        cr.set_source_surface(vignette, 0.0, 0.0).ok();
+        let _ = cr.paint();
+    }
 
     let flicker = 0.02 * hash((t * 30.0) as u64);
     set(cr, dark(), flicker);

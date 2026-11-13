@@ -1,6 +1,6 @@
 //! Shows the transcribing animation on its own, fed with simulated progress.
 //!
-//!     cargo run --release --example transcribe_animation
+//!     cargo run --release --example transcribe_animation [full|minimal|off]
 
 #[allow(dead_code)]
 #[path = "../src/animation.rs"]
@@ -25,12 +25,17 @@ const LINES: &[&str] = &[
 ];
 
 fn main() -> glib::ExitCode {
+    let motion = std::env::args()
+        .nth(1)
+        .map(|key| animation::Motion::from_key(&key))
+        .unwrap_or_default();
     let app = adw::Application::builder()
         .application_id("com.jankeesvw.OmarchyMeetingRecorder.AnimationPreview")
         .build();
     app.connect_startup(|_| theme::follow(|| {}));
-    app.connect_activate(|app| {
+    app.connect_activate(move |app| {
         let anim = animation::TranscribeAnimation::new();
+        anim.set_motion(motion);
         let window = gtk::ApplicationWindow::builder()
             .application(app)
             .title("Transcribe animation preview")
@@ -61,5 +66,5 @@ fn main() -> glib::ExitCode {
         });
         window.present();
     });
-    app.run()
+    app.run_with_args::<&str>(&[])
 }
