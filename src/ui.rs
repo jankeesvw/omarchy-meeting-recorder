@@ -3,7 +3,7 @@
 //! animation, edge to edge) and done (the transcript and what to do with it).
 
 use std::cell::{Cell, RefCell};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -14,7 +14,7 @@ use gtk::{gio, glib};
 
 use crate::agent::{self, Agent};
 use crate::animation::TranscribeAnimation;
-use crate::audio::{HISTORY, Source, to_meter};
+use crate::audio::{self, HISTORY, Source, to_meter};
 use crate::chapters::{self, Chapter};
 use crate::export::{self, Format, export_audio, export_tracks};
 use crate::ipc::{self, SharedStatus, Status};
@@ -65,6 +65,31 @@ fn keeps_awake(state: State) -> bool {
 }
 
 /// Where a transcription reads its two tracks from.
+/// The transcription on the `remote` host of config.toml, from the Opus
+/// tracks in the meeting folder. None (transcribe here) when no host is set,
+/// the tracks are missing or the host fails; a cancel is kept.
+fn remote_transcription(
+    meeting_dir: &Path,
+    language: &str,
+    events: &transcribe::Events,
+    abort: &Abort,
+) -> Option<Result<transcribe::Transcript, String>> {
+    let host = crate::remote::host()?;
+    let (mic, computer) = export::tracks(meeting_dir);
+    if !(mic.exists() && computer.exists()) {
+        return None;
+    }
+    match crate::remote::transcribe(&host, &mic, &computer, language, events, abort) {
+        Err(e) if e != CANCELLED => {
+            eprintln!("transcribing here, {host} failed: {e}");
+            let stage = format!("{host} failed, transcribing here");
+            let _ = events.send_blocking(Event::Stage(stage));
+            None
+        }
+        result => Some(result),
+    }
+}
+
 enum Tracks {
     /// The staging files of a recording that just stopped.
     Raw(PathBuf),
@@ -98,8 +123,8 @@ struct Hub {
 impl Hub {
     fn new(app: &adw::Application) -> Rc<Self> {
         let hub = Rc::new(Hub {
-            mic: Source::spawn("@DEFAULT_SOURCE@"),
-            system: Source::spawn("@DEFAULT_MONITOR@"),
+            mic: Source::spawn(audio::to_record(&settings::load_mic_device(), false)),
+            system: Source::spawn(audio::to_record(&settings::load_system_device(), true)),
             statuses: ipc::Statuses::default(),
             windows: RefCell::default(),
         });
@@ -321,6 +346,74 @@ pub fn run(open: Option<&str>) -> glib::ExitCode {
         Some(path) => app.run_with_args(&[APP_NAME, path]),
         None => app.run_with_args::<&str>(&[]),
     }
+}
+
+/// The microphone, or with `outputs` the output whose sound is recorded:
+/// "System default" and the devices there are now. A choice is remembered and
+/// switches `source` at once, in the middle of a recording too.
+fn device_row(source: &Source, outputs: bool) -> adw::ComboRow {
+    let (title, subtitle, saved, save): (_, _, _, fn(&str)) = if outputs {
+        (
+            "Computer audio",
+            "The output you hear the call on",
+            settings::load_system_device(),
+            settings::save_system_device,
+        )
+    } else {
+        (
+            "Microphone",
+            "What you speak into",
+            settings::load_mic_device(),
+            settings::save_mic_device,
+        )
+    };
+    let devices = audio::devices(outputs);
+    let mut labels = vec!["System default"];
+    labels.extend(devices.iter().map(|device| device.label.as_str()));
+    let row = adw::ComboRow::builder()
+        .title(title)
+        .subtitle(subtitle)
+        .model(&gtk::StringList::new(&labels))
+        .build();
+    let selected = devices.iter().position(|device| device.name == saved);
+    row.set_selected(selected.map_or(0, |i| i as u32 + 1));
+    let source = source.clone();
+    row.connect_selected_notify(move |row| {
+        let name = (row.selected() as usize)
+            .checked_sub(1)
+            .and_then(|i| devices.get(i))
+            .map_or("", |device| device.name.as_str());
+        save(name);
+        source.set_device(&audio::to_record(name, outputs));
+    });
+    row
+}
+
+/// Where recordings are transcribed: this computer or an SSH host. A saved
+/// host gone from `~/.ssh/config` is still listed, so the choice shows.
+fn remote_row() -> adw::ComboRow {
+    let saved = settings::load_remote();
+    let mut hosts = crate::remote::ssh_hosts();
+    if !saved.is_empty() && !hosts.contains(&saved) {
+        hosts.push(saved.clone());
+    }
+    let mut labels = vec!["This computer"];
+    labels.extend(hosts.iter().map(String::as_str));
+    let row = adw::ComboRow::builder()
+        .title("Transcribe on")
+        .subtitle("Another computer over SSH, this one if it can't be reached")
+        .model(&gtk::StringList::new(&labels))
+        .build();
+    let selected = hosts.iter().position(|host| *host == saved);
+    row.set_selected(selected.map_or(0, |i| i as u32 + 1));
+    row.connect_selected_notify(move |row| {
+        let host = (row.selected() as usize)
+            .checked_sub(1)
+            .and_then(|i| hosts.get(i))
+            .map_or("", String::as_str);
+        settings::save_remote(host);
+    });
+    row
 }
 
 struct Recorder {
@@ -558,8 +651,11 @@ impl Recorder {
             }
         });
         group.add(&title_row);
+        group.add(&device_row(&mic, false));
+        group.add(&device_row(&system, true));
         group.add(&format_row);
         group.add(&language_row);
+        group.add(&remote_row());
         group.add(&webcam_row);
         content.append(&group);
 
@@ -2605,21 +2701,27 @@ impl Recorder {
         *self.abort.borrow_mut() = Some(abort.clone());
         let (events_tx, events_rx) = async_channel::unbounded::<Event>();
         let (done_tx, done_rx) = async_channel::bounded(1);
+        let meeting_dir = out.clone();
         std::thread::spawn(move || {
             let result = match tracks {
                 Tracks::Single(path, speakers) => transcribe::load_track(&path).and_then(|track| {
                     transcribe::transcribe_single(&track, language, speakers, &events_tx, &abort)
                 }),
                 Tracks::Raw(dir) | Tracks::Kept(dir) => {
-                    let (mic_path, computer_path) = if dir.join("mic.raw").exists() {
-                        (dir.join("mic.raw"), dir.join("system.raw"))
-                    } else {
-                        export::tracks(&dir)
-                    };
-                    transcribe::load_track(&mic_path).and_then(|mic| {
-                        let computer = transcribe::load_track(&computer_path)?;
-                        transcribe::transcribe(&mic, &computer, language, &events_tx, &abort)
-                    })
+                    remote_transcription(&meeting_dir, language, &events_tx, &abort)
+                        .unwrap_or_else(|| {
+                            let (mic_path, computer_path) = if dir.join("mic.raw").exists() {
+                                (dir.join("mic.raw"), dir.join("system.raw"))
+                            } else {
+                                export::tracks(&dir)
+                            };
+                            transcribe::load_track(&mic_path).and_then(|mic| {
+                                let computer = transcribe::load_track(&computer_path)?;
+                                transcribe::transcribe(
+                                    &mic, &computer, language, &events_tx, &abort,
+                                )
+                            })
+                        })
                 }
             };
             let _ = done_tx.send_blocking(result);
