@@ -1,6 +1,6 @@
 //! Remembered preferences: the audio format, the transcription language,
-//! the webcam, the name you go by in transcripts and whether the bar widget
-//! was offered.
+//! the webcam, the audio devices, the name you go by in transcripts and
+//! whether the bar widget was offered.
 
 use std::path::PathBuf;
 
@@ -81,6 +81,24 @@ pub fn save_webcam_on(on: bool) {
     save("webcam_on", if on { "yes" } else { "no" });
 }
 
+/// The microphone to record (a PulseAudio source name), "" for the default.
+pub fn load_mic_device() -> String {
+    load()["mic_device"].as_str().unwrap_or_default().to_owned()
+}
+
+pub fn save_mic_device(name: &str) {
+    save("mic_device", name);
+}
+
+/// The output whose sound is recorded (the name of its monitor), "" for the default.
+pub fn load_system_device() -> String {
+    load()["system_device"].as_str().unwrap_or_default().to_owned()
+}
+
+pub fn save_system_device(name: &str) {
+    save("system_device", name);
+}
+
 /// What the mic side is called in new transcripts, "You" until you change it.
 pub fn load_your_name() -> String {
     load()["your_name"]
@@ -93,6 +111,15 @@ pub fn load_your_name() -> String {
 
 pub fn save_your_name(name: &str) {
     save("your_name", name);
+}
+
+/// The SSH host that transcribes recordings, "" for this computer.
+pub fn load_remote() -> String {
+    load()["remote"].as_str().unwrap_or_default().to_owned()
+}
+
+pub fn save_remote(host: &str) {
+    save("remote", host);
 }
 
 /// Whether the app already asked to put its widget in the bar.

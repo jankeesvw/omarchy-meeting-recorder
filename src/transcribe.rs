@@ -633,6 +633,27 @@ fn hex(bytes: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 // Transcription
 
+/// Threads for whisper and the speaker model: half the cores, so a call
+/// going on next to a transcription keeps the rest.
+pub fn worker_threads() -> usize {
+    std::thread::available_parallelism()
+        .map_or(4, |n| n.get() / 2)
+        .max(1)
+}
+
+/// Gives the CPU to everything else first: nice 19 for the calling thread.
+/// Linux keeps the nice value per thread and new threads inherit it, so the
+/// whisper and speaker-model workers started from here run at 19 too.
+fn yield_cpu() {
+    // SAFETY: setpriority on the calling thread (who = 0) touches no memory.
+    if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 19) } != 0 {
+        eprintln!(
+            "could not lower the transcription's priority: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
 /// Transcribes the meeting. `language` is a whisper code or "auto".
 pub fn transcribe(
     mic: &[f32],
@@ -641,6 +662,7 @@ pub fn transcribe(
     events: &Events,
     abort: &Abort,
 ) -> Result<Transcript, String> {
+    yield_cpu();
     let duration_secs = (mic.len().max(computer.len()) / WHISPER_RATE) as i64;
     let empty = |language: &str| Transcript {
         segments: Vec::new(),
@@ -952,6 +974,7 @@ pub fn transcribe_single(
     events: &Events,
     abort: &Abort,
 ) -> Result<Transcript, String> {
+    yield_cpu();
     let duration_secs = (track.len() / WHISPER_RATE) as i64;
     let empty = || Transcript {
         segments: Vec::new(),
@@ -1092,8 +1115,7 @@ fn run_whisper(
 ) -> Result<(Vec<Word>, Option<String>), String> {
     let mut state = context.create_state().map_err(|e| e.to_string())?;
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-    params.set_n_threads(threads.min(16) as i32);
+    params.set_n_threads(worker_threads().min(16) as i32);
     params.set_language(Some(language));
     params.set_print_special(false);
     params.set_print_progress(false);
@@ -1471,6 +1493,7 @@ pub fn to_markdown(title: &str, date: &str, transcript: &Transcript) -> String {
 pub fn cli(args: &[String]) -> glib::ExitCode {
     let mut files = Vec::new();
     let mut language = "auto".to_owned();
+    let mut json = false;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -1482,13 +1505,14 @@ pub fn cli(args: &[String]) -> glib::ExitCode {
                 Some(name) => crate::models::set_override(name),
                 None => return usage(),
             },
+            "--json" => json = true,
             _ => files.push(PathBuf::from(arg)),
         }
     }
     let [mic_path, computer_path] = files.as_slice() else {
         return usage();
     };
-    run_cli(|events, abort| {
+    run_cli(json, |events, abort| {
         let mic = load_track(mic_path)?;
         let computer = load_track(computer_path)?;
         transcribe(&mic, &computer, &language, events, abort)
@@ -1521,20 +1545,34 @@ pub fn cli_file(args: &[String]) -> glib::ExitCode {
     let [path] = files.as_slice() else {
         return usage();
     };
-    run_cli(|events, abort| {
+    run_cli(false, |events, abort| {
         let track = load_track(path)?;
         transcribe_single(&track, &language, speakers, events, abort)
     })
 }
 
 /// Runs a transcription for the command line: progress and live lines on
-/// stderr, the Markdown on stdout.
-fn run_cli(work: impl FnOnce(&Events, &Abort) -> Result<Transcript, String>) -> glib::ExitCode {
+/// stderr, the Markdown on stdout. With `json` (for `remote.rs`) every event
+/// is a JSON line on stderr and the transcript is JSON on stdout.
+fn run_cli(
+    json: bool,
+    work: impl FnOnce(&Events, &Abort) -> Result<Transcript, String>,
+) -> glib::ExitCode {
     let (tx, rx) = async_channel::unbounded();
     let started = Instant::now();
     let reporter = std::thread::spawn(move || {
         let mut last_stage = String::new();
         while let Ok(event) = rx.recv_blocking() {
+            if json {
+                let line = match event {
+                    Event::Stage(stage) => serde_json::json!({ "stage": stage }),
+                    Event::Progress(progress) => serde_json::json!({ "progress": progress }),
+                    Event::Segment(text) => serde_json::json!({ "segment": text }),
+                    Event::Finished => break,
+                };
+                eprintln!("{line}");
+                continue;
+            }
             match event {
                 Event::Stage(stage) if stage != last_stage => {
                     // Downloads report every percent; show every tenth.
@@ -1560,6 +1598,10 @@ fn run_cli(work: impl FnOnce(&Events, &Abort) -> Result<Transcript, String>) -> 
     let _ = reporter.join();
 
     match result {
+        Ok(transcript) if json => {
+            print!("{}", transcript_json(&transcript));
+            glib::ExitCode::SUCCESS
+        }
         Ok(transcript) => {
             let date = glib::DateTime::now_local()
                 .and_then(|t| t.format("%Y-%m-%d %H:%M"))
@@ -1576,9 +1618,59 @@ fn run_cli(work: impl FnOnce(&Events, &Abort) -> Result<Transcript, String>) -> 
     }
 }
 
+fn transcript_json(transcript: &Transcript) -> serde_json::Value {
+    let segments: Vec<_> = transcript
+        .segments
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "start_ms": s.start_ms,
+                "end_ms": s.end_ms,
+                "speaker": s.speaker,
+                "text": s.text,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "language": transcript.language,
+        "duration_secs": transcript.duration_secs,
+        "segments": segments,
+    })
+}
+
+/// The inverse of `transcript_json`.
+pub fn transcript_from_json(text: &str) -> Result<Transcript, String> {
+    let bad = || {
+        format!(
+            "unexpected transcript JSON: {}",
+            text.chars().take(200).collect::<String>()
+        )
+    };
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|_| bad())?;
+    let segments = value["segments"]
+        .as_array()
+        .ok_or_else(bad)?
+        .iter()
+        .map(|s| {
+            Some(Segment {
+                start_ms: s["start_ms"].as_i64()?,
+                end_ms: s["end_ms"].as_i64()?,
+                speaker: s["speaker"].as_str()?.to_owned(),
+                text: s["text"].as_str()?.to_owned(),
+            })
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(bad)?;
+    Ok(Transcript {
+        segments,
+        language: value["language"].as_str().ok_or_else(bad)?.to_owned(),
+        duration_secs: value["duration_secs"].as_i64().ok_or_else(bad)?,
+    })
+}
+
 fn usage() -> glib::ExitCode {
     eprintln!(
-        "Usage: {APP_NAME} transcribe <mic> <computer> [--language auto|en|nl|...] [--model name]"
+        "Usage: {APP_NAME} transcribe <mic> <computer> [--language auto|en|nl|...] [--model name] [--json]"
     );
     eprintln!(
         "       {APP_NAME} transcribe-file <audio> [--speakers N] [--language auto|en|nl|...] [--model name]"
