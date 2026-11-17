@@ -50,7 +50,7 @@ Your microphone and whatever your computer plays are recorded as two separate tr
 
 ### Records your webcam too, if you like
 
-Turn on **Webcam** and your camera is recorded next to the audio, as `webcam.mp4` (picture only) in the meeting folder, and a small live picture in its row shows what it sees. The video keeps time with the audio: with the camera on, a recording (or a resume) starts its audio once the first frame is in, pauses are left out as in the audio, and you can turn the camera on or off during the recording, black filling the time it was off. The toggle is remembered, and so is the camera, which is the first real one the system has. Open the meeting later and the video plays small in the corner of the transcript, in step with the audio.
+Turn on **Webcam** and your camera is recorded next to the audio, as `webcam.mp4` (picture only) in the meeting folder, and a small live picture in its row shows what it sees. The video keeps time with the audio: with the camera on, a recording (or a resume) starts its audio once the first frame is in, pauses are left out as in the audio, and you can turn the camera on or off during the recording, black filling the time it was off. The toggle is remembered, and so is the camera: the first real one the system has, or the one you pick under **Camera** when there are more (OBS's virtual camera, for instance, to record the picture OBS makes). Open the meeting later and the video plays small in the corner of the transcript, in step with the audio.
 
 ### Keeps your meeting notes next to the recording
 
