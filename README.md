@@ -84,7 +84,9 @@ Drop an audio file on the window, or click **Import an audio file**: a phone mem
 
 ### Gives you a transcript you can listen to
 
-The done screen puts the transcript on the right: the time, the speaker and the text in their own columns, one paragraph per turn. Above it sits a player with a waveform of both sides, your side above the line and the other side below it. Click or drag in the waveform to seek, or click any line to play from there. The line that is playing is highlighted and the transcript scrolls along.
+The done screen puts the transcript on the right: the time, the speaker and the text in their own columns, one paragraph per turn. Above it sits a player with a waveform of both sides, your side above the line and the other side below it. Click in the waveform to seek, or click any line to play from there. The line that is playing is highlighted and the transcript scrolls along.
+
+Recorded too early, or forgot to stop? Drag across the waveform to select the part that matters and press the scissors next to it. That part becomes a new meeting, with its audio, webcam video, transcript and chapters, without transcribing again. The meeting you cut it from stays as it is.
 
 On the left: the meeting name and one row per speaker, which you can rename at any time (the folder, the transcript and the manifest follow, and your own name is remembered for next time; give two speakers the same name and they become one), the chapters, **Copy transcript** (also Enter), Open folder, New recording, and the language to transcribe again in.
 

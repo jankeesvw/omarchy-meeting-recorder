@@ -1,5 +1,6 @@
 //! The player on the done page: a two-lane waveform of the meeting (you above
-//! the line, the other side below it) with a playhead, click or drag to seek.
+//! the line, the other side below it) with a playhead. Click to seek, drag to
+//! select a part and save it as a new meeting.
 //!
 //! Playback is `ffmpeg` decoding into `pacat`, not GStreamer: a stock Omarchy
 //! has no GStreamer audio sink, while `pacat` comes with the same package as
@@ -25,8 +26,10 @@ use crate::export;
 const BINS: usize = 1000;
 const MIC_COLOR: (f64, f64, f64) = (0.21, 0.52, 0.89);
 const SYSTEM_COLOR: (f64, f64, f64) = (0.90, 0.38, 0.0);
+const SELECTION_COLOR: (f64, f64, f64) = (0.3, 0.65, 1.0);
 
 type PositionCallback = Rc<RefCell<Option<Box<dyn Fn(i64)>>>>;
+type TrimCallback = Rc<RefCell<Option<Box<dyn Fn(i64, i64)>>>>;
 
 /// Frames of the webcam a second ahead, as (time in µs, JPEG).
 type VideoFrames = async_channel::Receiver<(i64, Vec<u8>)>;
@@ -233,6 +236,7 @@ struct State {
     generation: u64,
     /// Chapter starts in ms with their titles, drawn as markers.
     chapters: Vec<(i64, String)>,
+    selection: Option<(i64, i64)>,
 }
 
 impl State {
@@ -258,6 +262,8 @@ pub struct Player {
     state: Rc<RefCell<State>>,
     /// Called with the position in ms while playing, for the transcript highlight.
     on_position: PositionCallback,
+    on_trim: TrimCallback,
+    trim: gtk::Button,
     ticking: Rc<Cell<bool>>,
 }
 
@@ -310,6 +316,15 @@ impl Player {
         root.append(&button);
         root.append(&wave);
         root.append(&time);
+        let trim = gtk::Button::builder()
+            .icon_name("edit-cut-symbolic")
+            .tooltip_text("Save the selection as a new meeting")
+            .valign(gtk::Align::Center)
+            .visible(false)
+            .css_classes(["circular", "flat"])
+            .sensitive(false)
+            .build();
+        root.append(&trim);
 
         let player = Player {
             root,
@@ -321,6 +336,8 @@ impl Player {
             time,
             state: Rc::default(),
             on_position: Rc::default(),
+            on_trim: Rc::default(),
+            trim,
             ticking: Rc::default(),
         };
 
@@ -331,21 +348,47 @@ impl Player {
 
         let this = player.clone();
         player.button.connect_clicked(move |_| this.toggle());
-
-        // Click or drag anywhere on the waveform to seek.
-        let drag = gtk::GestureDrag::new();
         let this = player.clone();
-        drag.connect_drag_begin(move |_, x, _| this.seek_to_x(x));
+        player.trim.connect_clicked(move |_| {
+            this.pause();
+            let selection = this.state.borrow().selection;
+            if let (Some((start, end)), Some(callback)) = (selection, this.on_trim.borrow().as_ref()) {
+                callback(start, end);
+            }
+        });
+
+        // Click anywhere on the waveform to seek, drag to select. The time
+        // pressed on is kept: the scissors appear on the first move and make
+        // the waveform narrower.
+        let drag = gtk::GestureDrag::new();
+        let pressed = Rc::new(Cell::new(0));
+        let this = player.clone();
+        let at = pressed.clone();
+        drag.connect_drag_begin(move |_, x, _| {
+            this.state.borrow_mut().selection = None;
+            at.set(this.time_at_x(x));
+            this.seek_to_x(x);
+        });
         let this = player.clone();
         drag.connect_drag_update(move |gesture, dx, _| {
-            if let Some((x, _)) = gesture.start_point() {
-                this.seek_to_x(x + dx);
+            if let Some((x, _)) = gesture.start_point()
+                && dx.abs() >= 4.0
+            {
+                if this.is_playing() {
+                    this.pause();
+                }
+                let a = pressed.get();
+                let b = this.time_at_x(x + dx);
+                this.state.borrow_mut().selection = Some((a.min(b), a.max(b)));
+                this.refresh();
             }
         });
         player.wave.add_controller(drag);
 
-        // Hovering a chapter marker shows its title.
-        player.wave.set_has_tooltip(true);
+        // Hovering a chapter marker shows its title, anywhere else how to use it.
+        player
+            .wave
+            .set_tooltip_text(Some("Click to seek. Drag to select a part to save."));
         let this = player.clone();
         player
             .wave
@@ -373,6 +416,16 @@ impl Player {
 
     pub fn connect_position(&self, callback: impl Fn(i64) + 'static) {
         *self.on_position.borrow_mut() = Some(Box::new(callback));
+    }
+
+    pub fn connect_trim(&self, callback: impl Fn(i64, i64) + 'static) {
+        *self.on_trim.borrow_mut() = Some(Box::new(callback));
+    }
+
+    /// Forgets the selection, once it is being saved.
+    pub fn clear_selection(&self) {
+        self.state.borrow_mut().selection = None;
+        self.refresh();
     }
 
     /// Loads the meeting in `dir`: its audio for playback, its tracks for the waveform.
@@ -473,6 +526,8 @@ impl Player {
         state.paused_at_us = 0;
         state.peaks = None;
         state.chapters.clear();
+        state.selection = None;
+        self.trim.set_visible(false);
         drop(state);
         self.set_playing_icon(false);
         self.wave.queue_draw();
@@ -590,9 +645,13 @@ impl Player {
     }
 
     fn seek_to_x(&self, x: f64) {
+        self.seek(self.time_at_x(x));
+    }
+
+    fn time_at_x(&self, x: f64) -> i64 {
         let width = f64::from(self.wave.width()).max(1.0);
         let fraction = (x / width).clamp(0.0, 1.0);
-        self.seek((self.duration_us() as f64 * fraction) as i64);
+        (self.duration_us() as f64 * fraction) as i64
     }
 
     fn set_playing_icon(&self, playing: bool) {
@@ -633,11 +692,18 @@ impl Player {
 
     fn refresh(&self) {
         let (position, duration) = (self.position_us(), self.duration_us());
+        let selection = self.state.borrow().selection;
+        self.trim.set_visible(selection.is_some());
+        self.trim
+            .set_sensitive(selection.is_some_and(|(start, end)| end - start >= 1_000_000));
         self.time.set_label(&format!(
             "{} / {}",
             clock(position / 1_000_000),
             clock(duration / 1_000_000)
         ));
+        if let Some((start, end)) = selection {
+            self.time.set_label(&format!("{} to {}", clock(start / 1_000_000), clock(end / 1_000_000)));
+        }
         self.wave.queue_draw();
         if let Some(callback) = self.on_position.borrow().as_ref() {
             callback(position / 1000);
@@ -656,6 +722,18 @@ impl Player {
         let step = width / BINS as f64;
         let bar = (step * 0.8).max(1.0);
         let head = played * width;
+        if let Some((start, end)) = state.selection.filter(|_| duration > 0) {
+            let left = start as f64 / duration as f64 * width;
+            let right = end as f64 / duration as f64 * width;
+            let (r, g, b) = crate::theme::color("accent", SELECTION_COLOR);
+            cr.set_source_rgba(r, g, b, 0.25);
+            cr.rectangle(left, 0.0, right - left, height);
+            let _ = cr.fill();
+            cr.set_source_rgba(r, g, b, 1.0);
+            cr.rectangle(left, 0.0, 2.0, height);
+            cr.rectangle(right - 2.0, 0.0, 2.0, height);
+            let _ = cr.fill();
+        }
 
         match state.peaks.as_ref() {
             Some((mic, computer)) => {
