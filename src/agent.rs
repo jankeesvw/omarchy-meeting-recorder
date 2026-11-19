@@ -46,7 +46,8 @@ pub const MAX_REQUEST_BYTES: usize = 512 * 1024;
 const MAX_STREAM_BYTES: u64 = 1024 * 1024;
 /// The answer handed back.
 pub const MAX_ANSWER_BYTES: usize = 128 * 1024;
-/// `ulimit -f` for the agent, in KiB. The kernel refuses writes past it, which
+/// `ulimit -f` for the agent. Bash running as `sh` counts it in 512-byte
+/// blocks, not KiB, so 2048 is 1 MiB. The kernel refuses writes past it, which
 /// bounds what a runaway agent can put on disk before anything reads it back.
 /// It has to fit the agent's own session file, which holds the whole prompt.
 const FILE_LIMIT_KB: u64 = 2048;
@@ -298,9 +299,30 @@ fn build(id: &str, prompt: &str, dir: &Path) -> Result<Built, String> {
     match id {
         "claude" => built.args = s(&claude),
         "codex" => {
+            // Codex keeps SQLite databases under $CODEX_HOME, and on a machine
+            // that has used it they are past the ulimit. A fresh database does
+            // not help on its own, since Codex backfills it from the sessions
+            // in its home. So its home is moved into the throwaway directory
+            // with only the credentials and config linked in, and --ephemeral
+            // keeps the run from writing a session. The databases it creates
+            // there still pass 1 MiB, so it gets the limit goose has.
+            let source = std::env::var_os("CODEX_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home().join(".codex"));
+            let codex_home = dir.join("codex-home");
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&codex_home)
+                .map_err(|e| e.to_string())?;
+            for name in ["auth.json", "config.toml"] {
+                link_regular(&source.join(name), &codex_home.join(name));
+            }
+            built.env.push(("CODEX_HOME", codex_home.into()));
+            built.file_limit_kb = 8192;
             // Codex prints progress around the answer on stdout, so it writes
             // the answer to a file instead; `-` reads the prompt from stdin.
             built.args = s(&["exec", "--sandbox", "read-only", "--skip-git-repo-check"]);
+            built.args.push("--ephemeral".into());
             built.args.extend(s(&["--color", "never", "-o"]));
             built.args.push(dir.join("answer.txt").into());
             for key in CODEX_NO_TOOLS {
@@ -805,17 +827,41 @@ mod tests {
 
     #[test]
     fn codex_turns_every_tool_feature_off_and_reads_stdin() {
-        let built = build("codex", "hi", Path::new("/w")).unwrap();
+        let dir = workdir().unwrap();
+        let built = build("codex", "hi", &dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
         let a = args(&built);
         assert_eq!(
-            &a[..4],
-            ["exec", "--sandbox", "read-only", "--skip-git-repo-check"]
+            &a[..5],
+            [
+                "exec",
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+                "--ephemeral"
+            ]
         );
-        assert!(a.contains(&"/w/answer.txt".to_owned()));
+        assert!(a.contains(&dir.join("answer.txt").to_string_lossy().into_owned()));
         for key in CODEX_NO_TOOLS {
             assert!(a.contains(&(*key).to_owned()), "{key}");
         }
         assert_eq!(a.last().unwrap(), "-");
+    }
+
+    #[test]
+    fn codex_state_stays_in_the_working_directory() {
+        let dir = workdir().unwrap();
+        let built = build("codex", "hi", &dir).unwrap();
+        let made = dir.join("codex-home").is_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(made);
+        assert!(
+            built
+                .env
+                .iter()
+                .any(|(k, v)| *k == "CODEX_HOME" && *v == dir.join("codex-home").as_os_str())
+        );
+        assert_eq!(built.file_limit_kb, 8192);
     }
 
     #[test]

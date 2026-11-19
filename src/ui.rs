@@ -58,6 +58,12 @@ impl State {
     }
 }
 
+/// Whether the machine should stay awake in this state: the stretch after
+/// Stop, when the audio is finished and transcribed without anyone around.
+fn keeps_awake(state: State) -> bool {
+    matches!(state, State::Stopping | State::Transcribing)
+}
+
 /// Where a transcription reads its two tracks from.
 enum Tracks {
     /// The staging files of a recording that just stopped.
@@ -331,10 +337,16 @@ struct Recorder {
     /// Whether to record the camera next to the audio.
     webcam_row: adw::SwitchRow,
     /// The camera the toggle records, when there is one.
-    webcam_camera: Option<(PathBuf, String)>,
+    webcam_camera: RefCell<Option<(PathBuf, String)>>,
+    /// Which camera that is, shown with more than one.
+    camera_row: adw::ComboRow,
+    cameras: Vec<(PathBuf, String)>,
     webcam: crate::webcam::Webcam,
     /// Waiting for the camera's first frame before the audio starts or resumes.
     starting: Cell<bool>,
+    /// The desktop's cookie for keeping the machine awake while the meeting
+    /// is processed; 0 while it may idle.
+    awake: Cell<u32>,
     /// What the camera sees, in the webcam row, before and while recording.
     webcam_preview: gtk::Picture,
     animation: TranscribeAnimation,
@@ -520,13 +532,11 @@ impl Recorder {
                 .position(|(code, _)| *code == saved)
                 .unwrap_or(0) as u32,
         );
-        let webcam_camera = crate::webcam::pick(&crate::webcam::devices(), &settings::load_webcam());
+        let cameras = crate::webcam::cameras(&crate::webcam::devices());
+        let webcam_camera = crate::webcam::pick(&cameras, &settings::load_webcam());
         let webcam_row = adw::SwitchRow::builder()
             .title("Webcam")
-            .subtitle(match &webcam_camera {
-                Some((_, name)) => format!("{name}, recorded as webcam.mp4"),
-                None => "No camera found".to_owned(),
-            })
+            .subtitle(webcam_subtitle(webcam_camera.as_ref()))
             .active(webcam_camera.is_some() && settings::load_webcam_on())
             .sensitive(webcam_camera.is_some())
             .build();
@@ -540,6 +550,19 @@ impl Recorder {
             .build();
         webcam_preview.set_overflow(gtk::Overflow::Hidden);
         webcam_row.add_prefix(&webcam_preview);
+        let camera_labels: Vec<&str> = cameras.iter().map(|(_, name)| name.as_str()).collect();
+        let camera_row = adw::ComboRow::builder()
+            .title("Camera")
+            .model(&gtk::StringList::new(&camera_labels))
+            .visible(cameras.len() > 1)
+            .build();
+        let picked = webcam_camera.as_ref().map(|(_, name)| name);
+        camera_row.set_selected(
+            cameras
+                .iter()
+                .position(|(_, name)| Some(name) == picked)
+                .unwrap_or(0) as u32,
+        );
         let (frames_tx, frames_rx) = async_channel::bounded::<Vec<u8>>(2);
         let picture = webcam_preview.clone();
         glib::spawn_future_local(async move {
@@ -553,6 +576,7 @@ impl Recorder {
         group.add(&format_row);
         group.add(&language_row);
         group.add(&webcam_row);
+        group.add(&camera_row);
         content.append(&group);
 
         let frozen: [Frozen; 2] = Default::default();
@@ -930,9 +954,12 @@ impl Recorder {
             format_row,
             language_row,
             webcam_row,
-            webcam_camera,
+            webcam_camera: RefCell::new(webcam_camera),
+            camera_row,
+            cameras,
             webcam: crate::webcam::Webcam::new(frames_tx),
             starting: Cell::new(false),
+            awake: Cell::new(0),
             webcam_preview,
             animation,
             meters,
@@ -1256,7 +1283,7 @@ impl Recorder {
         self.webcam_row.connect_active_notify(move |row| {
             if let Some(r) = weak.upgrade() {
                 settings::save_webcam_on(row.is_active());
-                if let Some((_, name)) = &r.webcam_camera {
+                if let Some((_, name)) = &*r.webcam_camera.borrow() {
                     settings::save_webcam(name);
                 }
                 // During a recording the camera joins or leaves; black fills where it was off.
@@ -1272,6 +1299,22 @@ impl Recorder {
                 }
                 r.update_preview();
             }
+        });
+
+        let weak = Rc::downgrade(self);
+        self.camera_row.connect_selected_notify(move |row| {
+            let Some(r) = weak.upgrade() else { return };
+            let Some(camera) = r.cameras.get(row.selected() as usize).cloned() else {
+                return;
+            };
+            settings::save_webcam(&camera.1);
+            r.webcam_row.set_subtitle(&webcam_subtitle(Some(&camera)));
+            *r.webcam_camera.borrow_mut() = Some(camera);
+            // The preview lets go of the old camera and opens the new one,
+            // without its last frame standing in for a camera that shows nothing.
+            r.webcam.preview(None);
+            r.webcam_preview.set_paintable(None::<&gtk::gdk::Paintable>);
+            r.update_preview();
         });
 
         let weak = Rc::downgrade(self);
@@ -1550,7 +1593,9 @@ impl Recorder {
                     r.confirm_close_transcribing();
                     glib::Propagation::Stop
                 }
-                // Saving the audio takes a moment; finish it, then quit.
+                // Saving the audio takes a moment; finish it, then quit. The
+                // hidden window no longer keeps the machine awake for the
+                // transcription that follows; see `keep_awake`.
                 State::Stopping => {
                     r.close_when_done();
                     glib::Propagation::Stop
@@ -1791,24 +1836,30 @@ impl Recorder {
     /// page is on screen; a paused recording leaves its last frame, dimmed.
     /// Nowhere else is the camera on.
     fn update_preview(&self) {
-        let on = self.webcam_camera.is_some() && self.webcam_row.is_active();
+        let on = self.webcam_camera.borrow().is_some() && self.webcam_row.is_active();
         let on_page = !self.compact.get()
             && self.layout.visible_child_name().as_deref() == Some("record");
         self.webcam_preview.set_visible(on);
+        // The row's prefix box stays visible around a hidden picture, and its
+        // spacing then pushes the title out of line with the other rows.
+        if let Some(prefixes) = self.webcam_preview.parent() {
+            prefixes.set_visible(on);
+        }
         self.webcam_preview
             .set_opacity(if self.paused.get() { 0.4 } else { 1.0 });
         if !on {
             self.webcam_preview.set_paintable(None::<&gtk::gdk::Paintable>);
         }
         if matches!(self.state.get(), State::Idle | State::Done) {
-            let device = self.webcam_camera.as_ref().map(|(device, _)| device.as_path());
+            let camera = self.webcam_camera.borrow();
+            let device = camera.as_ref().map(|(device, _)| device.as_path());
             self.webcam.preview(device.filter(|_| on && on_page));
         }
     }
 
     /// The camera to record, as (device, name); None when the toggle is off.
     fn selected_webcam(&self) -> Option<(PathBuf, String)> {
-        self.webcam_camera.clone().filter(|_| self.webcam_row.is_active())
+        self.webcam_camera.borrow().clone().filter(|_| self.webcam_row.is_active())
     }
 
     /// Opens the notes in `path` next to the recording page.
@@ -1858,6 +1909,7 @@ impl Recorder {
             self.dismiss_find();
         }
         self.state.set(state);
+        self.keep_awake(keeps_awake(state));
         let mut shared = self.shared.lock().unwrap();
         shared.state = if state == State::Recording && self.paused.get() {
             "paused"
@@ -1880,13 +1932,37 @@ impl Recorder {
         self.render();
     }
 
+    /// Asks the desktop not to idle while the meeting is processed, and lets
+    /// it again afterwards. Idle is what holds off the screensaver, the lock
+    /// and suspending on idle, and under a compositor with the idle-inhibit
+    /// protocol GTK grants it there; asking for suspend as well only has the
+    /// portal refuse it and GTK log a warning. Compositors honour the
+    /// inhibitor while the window is on screen, so a window hidden with
+    /// "Close when done" or "Stop and close" no longer keeps the machine awake.
+    fn keep_awake(&self, on: bool) {
+        let Some(app) = self.window.application() else {
+            return;
+        };
+        let cookie = self.awake.get();
+        if on && cookie == 0 {
+            let flags = gtk::ApplicationInhibitFlags::IDLE;
+            self.awake
+                .set(app.inhibit(Some(&self.window), flags, Some("Finishing a meeting")));
+        } else if !on && cookie != 0 {
+            app.uninhibit(cookie);
+            self.awake.set(0);
+        }
+    }
+
     fn render(&self) {
         let state = self.state.get();
         let recording = state == State::Recording;
         self.webcam_row.set_sensitive(
-            self.webcam_camera.is_some()
+            self.webcam_camera.borrow().is_some()
                 && matches!(state, State::Idle | State::Done | State::Recording),
         );
+        // A recording keeps its camera; it can be switched off, not swapped.
+        self.camera_row.set_sensitive(matches!(state, State::Idle | State::Done));
         self.dot.set_visible(recording);
         self.compact_button.set_visible(recording);
         self.find_button.set_visible(state == State::Done);
@@ -2472,12 +2548,15 @@ impl Recorder {
         // The audio waits for the camera's first frame, so the two start together.
         self.starting.set(true);
         self.button.set_sensitive(false);
+        // The camera that is opening is the one recorded: no picking another meanwhile.
+        self.camera_row.set_sensitive(false);
         self.status_label.set_label("Starting the camera…");
         let this = self.clone();
         glib::spawn_future_local(async move {
             this.webcam.first_frame(Duration::from_secs(3)).await;
             this.starting.set(false);
             this.button.set_sensitive(true);
+            this.camera_row.set_sensitive(true);
             this.start_audio(staging);
         });
     }
@@ -3864,6 +3943,7 @@ impl Recorder {
         self.toast("Saved");
     }
 
+    /// Hidden, the window no longer keeps the machine awake; see `keep_awake`.
     fn close_when_done(&self) {
         self.quit_when_done.set(true);
         self.window.set_visible(false);
@@ -3873,7 +3953,9 @@ impl Recorder {
         let dialog = adw::AlertDialog::new(
             Some("Still recording"),
             Some(
-                "Closing stops the meeting. The audio is saved and transcribed first, then the window closes.",
+                "Closing stops the meeting. The audio is saved and transcribed in the background, \
+                 then the window closes. Hidden, the window no longer keeps the machine awake \
+                 while the transcript finishes.",
             ),
         );
         dialog.add_response("keep", "Keep recording");
@@ -3894,7 +3976,10 @@ impl Recorder {
     fn confirm_close_transcribing(self: &Rc<Self>) {
         let dialog = adw::AlertDialog::new(
             Some("Still transcribing"),
-            Some("The audio is already saved. The transcript is not finished yet."),
+            Some(
+                "The audio is already saved. The transcript is not finished yet. \
+                 Hidden, the window no longer keeps the machine awake while the transcript finishes.",
+            ),
         );
         dialog.add_response("keep", "Keep open");
         dialog.add_response("later", "Close when done");
@@ -4098,6 +4183,14 @@ fn hyprctl_dispatch(call: &str) {
 /// describes it.
 fn own_window(pid: u32, size: (i32, i32)) -> Option<serde_json::Value> {
     pick_window(hyprctl_json("clients")?.as_array()?, pid, size).cloned()
+}
+
+/// What the Webcam row says under its title.
+fn webcam_subtitle(camera: Option<&(PathBuf, String)>) -> String {
+    match camera {
+        Some((_, name)) => format!("{name}, recorded as webcam.mp4"),
+        None => "No camera found".to_owned(),
+    }
 }
 
 /// Of this process's floating windows, the one of `size`; with more of that
@@ -4487,7 +4580,16 @@ fn meter_block(name: &str, meter: &gtk::DrawingArea) -> gtk::Box {
 
 #[cfg(test)]
 mod tests {
-    use super::pick_window;
+    use super::{State, keeps_awake, pick_window};
+
+    #[test]
+    fn the_machine_stays_awake_only_while_the_meeting_is_processed() {
+        assert!(keeps_awake(State::Stopping));
+        assert!(keeps_awake(State::Transcribing));
+        assert!(!keeps_awake(State::Idle));
+        assert!(!keeps_awake(State::Recording));
+        assert!(!keeps_awake(State::Done));
+    }
 
     #[test]
     fn a_resize_goes_to_the_window_it_is_for() {

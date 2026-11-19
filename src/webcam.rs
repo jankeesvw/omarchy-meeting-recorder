@@ -20,7 +20,7 @@ use crate::APP_NAME;
 /// The video in a meeting folder, when a webcam was recorded.
 pub const FILE: &str = "webcam.mp4";
 
-/// The video devices, as (device, name), sorted by name.
+/// The video devices, as (device, name), sorted by name and then by node.
 pub fn devices() -> Vec<(PathBuf, String)> {
     let Ok(entries) = std::fs::read_dir("/sys/class/video4linux") else {
         return Vec::new();
@@ -32,17 +32,37 @@ pub fn devices() -> Vec<(PathBuf, String)> {
             Some((PathBuf::from("/dev").join(entry.file_name()), name.trim().to_owned()))
         })
         .collect();
-    found.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    sort(&mut found);
     found
 }
 
+/// By name, then by node number, so video9 comes before video10 and each
+/// camera starts on its first node, the one with the picture.
+fn sort(devices: &mut [(PathBuf, String)]) {
+    let node = |device: &PathBuf| device.to_str()?.strip_prefix("/dev/video")?.parse::<u32>().ok();
+    devices.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| node(&a.0).cmp(&node(&b.0))));
+}
+
+/// The cameras to choose from: each name once, on its first device (a camera
+/// has more, for metadata), without dummy loopback devices.
+pub fn cameras(devices: &[(PathBuf, String)]) -> Vec<(PathBuf, String)> {
+    let mut cameras: Vec<(PathBuf, String)> = Vec::new();
+    for (device, name) in devices {
+        if !name.starts_with("Dummy video device") && !cameras.iter().any(|(_, n)| n == name) {
+            cameras.push((device.clone(), name.clone()));
+        }
+    }
+    cameras
+}
+
 /// The camera the webcam toggle records: the one named `saved` when it is
-/// there, else the first that is not a dummy loopback device.
+/// there, else the first of `cameras`.
 pub fn pick(devices: &[(PathBuf, String)], saved: &str) -> Option<(PathBuf, String)> {
-    devices
+    let cameras = cameras(devices);
+    cameras
         .iter()
         .find(|(_, name)| !saved.is_empty() && name == saved)
-        .or_else(|| devices.iter().find(|(_, name)| !name.starts_with("Dummy video device")))
+        .or(cameras.first())
         .cloned()
 }
 
@@ -461,6 +481,32 @@ mod tests {
         assert_eq!(pick(&devices, "Laptop camera").map(|d| d.1), Some("Laptop camera".to_owned()));
         assert_eq!(pick(&devices, "Gone").map(|d| d.1), Some("Opal C1".to_owned()));
         assert_eq!(pick(&devices[..1], ""), None);
+    }
+
+    #[test]
+    fn each_camera_is_offered_once_on_its_first_device() {
+        let devices = vec![
+            (PathBuf::from("/dev/video0"), "Laptop camera".to_owned()),
+            (PathBuf::from("/dev/video1"), "Laptop camera".to_owned()),
+            (PathBuf::from("/dev/video8"), "Dummy video device (0x0000)".to_owned()),
+            (PathBuf::from("/dev/video4"), "Opal C1".to_owned()),
+            (PathBuf::from("/dev/video5"), "Opal C1".to_owned()),
+        ];
+        let offered: Vec<_> = cameras(&devices).into_iter().map(|(d, _)| d).collect();
+        assert_eq!(offered, [PathBuf::from("/dev/video0"), PathBuf::from("/dev/video4")]);
+        assert_eq!(pick(&devices, "Opal C1").map(|d| d.0), Some(PathBuf::from("/dev/video4")));
+    }
+
+    #[test]
+    fn video9_comes_before_video10() {
+        let mut devices = vec![
+            (PathBuf::from("/dev/video10"), "Opal C1".to_owned()),
+            (PathBuf::from("/dev/video9"), "Opal C1".to_owned()),
+            (PathBuf::from("/dev/video2"), "Laptop camera".to_owned()),
+        ];
+        sort(&mut devices);
+        let offered: Vec<_> = cameras(&devices).into_iter().map(|(d, _)| d).collect();
+        assert_eq!(offered, [PathBuf::from("/dev/video2"), PathBuf::from("/dev/video9")]);
     }
 
     #[test]
