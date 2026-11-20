@@ -11,6 +11,11 @@ import qs.Ui
 // it shows a steady dot and the progress. Hidden otherwise. Clicking it brings
 // the recorder window back. All data comes from `omarchy-meeting-recorder watch`
 // as NDJSON.
+//
+// The waveform repaints on every state line (20 a second while recording) and
+// the dot pulses every frame, so the bar redraws continuously on every screen.
+// With the `liveWaveform` setting off the widget shows a steady dot and the time
+// and redraws once a second, for those who keep the recorder window in view.
 BarWidget {
   id: root
   moduleName: "jankeesvw.meeting-recorder"
@@ -30,6 +35,7 @@ BarWidget {
                                 || recorderState === "transcribing"
   readonly property color foreground: bar ? bar.barForeground : Commons.Color.foreground
   readonly property color recordColor: Commons.Color.urgent
+  readonly property bool liveWaveform: setting("liveWaveform", true) !== false
 
   visible: shown
   implicitWidth: shown ? content.implicitWidth + Style.space(14) : 0
@@ -64,7 +70,7 @@ BarWidget {
     root.progress = root.level(data.progress)
     root.title = typeof data.title === "string" ? data.title.slice(0, root.maxTitleLength) : ""
 
-    if (root.recorderState === "recording") {
+    if (root.recorderState === "recording" && root.liveWaveform) {
       root.micHistory = pushLevel(root.micHistory, data.mic)
       root.computerHistory = pushLevel(root.computerHistory, data.computer)
       wave.requestPaint()
@@ -115,7 +121,7 @@ BarWidget {
       opacity: 1
 
       SequentialAnimation on opacity {
-        running: root.recorderState === "recording"
+        running: root.recorderState === "recording" && root.liveWaveform
         loops: Animation.Infinite
         alwaysRunToEnd: true
         NumberAnimation { to: 0.3; duration: 700; easing.type: Easing.InOutSine }
@@ -128,7 +134,7 @@ BarWidget {
       anchors.verticalCenter: parent.verticalCenter
       width: Style.space(root.historyLength * 2)
       height: Math.round(root.barSize * 0.62)
-      visible: !root.vertical && root.recorderState === "recording"
+      visible: !root.vertical && root.recorderState === "recording" && root.liveWaveform
 
       onPaint: {
         var ctx = getContext("2d")

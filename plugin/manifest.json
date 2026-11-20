@@ -12,6 +12,16 @@
     "description": "Live waveform while a meeting is being recorded",
     "category": "Audio",
     "allowMultiple": false,
-    "defaultSection": "right"
+    "defaultSection": "right",
+    "defaults": { "liveWaveform": true },
+    "schema": [
+      {
+        "key": "liveWaveform",
+        "type": "boolean",
+        "label": "Live waveform",
+        "description": "Animate the waveform and the recording dot. Off shows a steady dot and the time, which uses less CPU.",
+        "defaultValue": true
+      }
+    ]
   }
 }
