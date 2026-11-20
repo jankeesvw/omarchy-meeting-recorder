@@ -37,6 +37,7 @@ Each case in `fixtures/` has its audio as Opus (like the app's own recordings) a
 - **side**: of those, on the right side of the call (you or the other side)
 - **person**: of those, with the right person (labels are matched to people one to one)
 - **leaked**: lines of yours that are really the other side coming through your speakers
+- **repeated**: sentences of three words or more that say the one before again, whisper looping on its own earlier text (#20); people hardly ever do it, so it stays 0
 - **lines**: lines in the transcript, only for `silence`
 - **speakers**: voices told apart, out of the voices in the case
 - **speaker error**: share of speech that `diarize` gives to the wrong speaker (imports only)
