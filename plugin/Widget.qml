@@ -80,6 +80,8 @@ BarWidget {
     return h > 0 ? h + ":" + mm + ":" + ss : mm + ":" + ss
   }
 
+  property bool destroying: false
+
   Process {
     id: watcher
     running: true
@@ -91,10 +93,17 @@ BarWidget {
 
   // The watcher only ends if the binary is missing or crashed; try again later.
   Timer {
+    id: restartTimer
     interval: 5000
-    running: !watcher.running
+    running: !root.destroying && !watcher.running
     repeat: true
     onTriggered: watcher.running = true
+  }
+
+  Component.onDestruction: {
+    destroying = true
+    restartTimer.stop()
+    watcher.running = false
   }
 
   Row {
