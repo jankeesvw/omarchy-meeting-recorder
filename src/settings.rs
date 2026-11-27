@@ -1,6 +1,6 @@
 //! Remembered preferences: the audio format, the transcription language,
-//! the webcam, the name you go by in transcripts and whether the bar widget
-//! was offered.
+//! the webcam, the inputs, the name you go by in transcripts and
+//! whether the bar widget was offered.
 
 use std::path::PathBuf;
 
@@ -79,6 +79,35 @@ pub fn load_webcam_on() -> bool {
 
 pub fn save_webcam_on(on: bool) {
     save("webcam_on", if on { "yes" } else { "no" });
+}
+
+/// The microphones chosen to record, by PulseAudio source name: None until
+/// a choice is made, which records the default microphone; empty when the
+/// choice is no microphone at all.
+pub fn load_mics() -> Option<Vec<String>> {
+    let settings = load();
+    let saved = settings["mics"].as_str()?;
+    Some(
+        saved
+            .lines()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+pub fn save_mics(names: &[String]) {
+    save("mics", &names.join("\n"));
+}
+
+/// Whether the computer audio is recorded, as it is until switched off.
+pub fn load_computer_audio() -> bool {
+    load()["computer_audio"].as_str() != Some("off")
+}
+
+pub fn save_computer_audio(on: bool) {
+    save("computer_audio", if on { "on" } else { "off" });
 }
 
 /// What the mic side is called in new transcripts, "You" until you change it.

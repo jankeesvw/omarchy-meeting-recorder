@@ -25,6 +25,14 @@ use crate::transcribe::{self, Abort, CANCELLED, Event, LANGUAGES};
 use crate::{APP_ID, APP_NAME, settings};
 
 const MIC_COLOR: (f64, f64, f64) = (0.21, 0.52, 0.89);
+/// The meters of the microphones, in order: blue as before, then colours
+/// that stay apart from it and from the computer audio's orange.
+const MIC_COLORS: [(&str, (f64, f64, f64)); 4] = [
+    ("blue", MIC_COLOR),
+    ("green", (0.18, 0.64, 0.38)),
+    ("magenta", (0.70, 0.33, 0.80)),
+    ("cyan", (0.10, 0.65, 0.70)),
+];
 const SYSTEM_COLOR: (f64, f64, f64) = (0.90, 0.38, 0.0);
 const FULL_SIZE: (i32, i32) = (480, 700);
 const COMPACT_SIZE: (i32, i32) = (300, 84);
@@ -97,9 +105,22 @@ struct Hub {
 
 impl Hub {
     fn new(app: &adw::Application) -> Rc<Self> {
+        let mic = Source::spawn(crate::audio::DEFAULT_MIC);
+        let system = Source::spawn(crate::audio::COMPUTER_AUDIO);
+        // The inputs chosen before, the microphones among them that are plugged in.
+        let (present, default) = crate::audio::microphones();
+        let mics = crate::audio::pick_mics(&present, &default, settings::load_mics().as_deref());
+        let computer = settings::load_computer_audio();
+        // Never nothing at all, and without a list the default microphone as before.
+        if present.is_empty() || mics.is_empty() && !computer {
+            mic.set_mics(&[crate::audio::DEFAULT_MIC.to_owned()]);
+        } else {
+            mic.set_mics(&mics);
+        }
+        system.set_input(computer.then_some(crate::audio::COMPUTER_AUDIO));
         let hub = Rc::new(Hub {
-            mic: Source::spawn("@DEFAULT_SOURCE@"),
-            system: Source::spawn("@DEFAULT_MONITOR@"),
+            mic,
+            system,
             statuses: ipc::Statuses::default(),
             windows: RefCell::default(),
         });
@@ -340,6 +361,12 @@ struct Recorder {
     /// Which camera that is, shown with more than one.
     camera_row: adw::ComboRow,
     cameras: Vec<(PathBuf, String)>,
+    /// Which inputs to record: one or more of the microphones there are,
+    /// and the computer audio.
+    mics_row: adw::ExpanderRow,
+    mic_rows: RefCell<Vec<MicRow>>,
+    computer_row: adw::ActionRow,
+    computer_check: gtk::CheckButton,
     webcam: crate::webcam::Webcam,
     /// Waiting for the camera's first frame before the audio starts or resumes.
     starting: Cell<bool>,
@@ -349,7 +376,13 @@ struct Recorder {
     /// What the camera sees, in the webcam row, before and while recording.
     webcam_preview: gtk::Picture,
     animation: TranscribeAnimation,
-    meters: [gtk::DrawingArea; 2],
+    /// A meter per microphone recorded, above the computer audio's.
+    mic_meters_box: gtk::Box,
+    mic_meters: RefCell<Vec<MicMeter>>,
+    system_meter: gtk::DrawingArea,
+    /// The computer audio's meter with its heading, hidden while it is off.
+    system_block: gtk::Box,
+    /// The minimized window's: all microphones in one, and the computer audio.
     compact_meters: [gtk::DrawingArea; 2],
     dot: gtk::Label,
     timer: gtk::Label,
@@ -422,7 +455,9 @@ struct Recorder {
     full_size: Cell<(i32, i32)>,
     started_at: Cell<i64>,
     paused: Cell<bool>,
+    /// The compact meters' levels while paused.
     frozen: [Frozen; 2],
+    system_frozen: Frozen,
     /// When the animation came on screen, to keep it there long enough.
     animation_since: Cell<Option<std::time::Instant>>,
     paused_secs: Cell<i64>,
@@ -571,24 +606,45 @@ impl Recorder {
                 }
             }
         });
+        let mics_row = adw::ExpanderRow::builder().title("Inputs").build();
+        let computer_check = gtk::CheckButton::builder()
+            .active(settings::load_computer_audio())
+            .valign(gtk::Align::Center)
+            .build();
+        let computer_row = adw::ActionRow::builder()
+            .title("Computer audio")
+            .subtitle("What the computer plays: the other side of a call")
+            .activatable_widget(&computer_check)
+            .build();
+        computer_row.add_prefix(&computer_check);
         group.add(&title_row);
         group.add(&format_row);
         group.add(&language_row);
+        group.add(&mics_row);
         group.add(&webcam_row);
         group.add(&camera_row);
         content.append(&group);
 
         let frozen: [Frozen; 2] = Default::default();
-        let meters = [
-            meter(&mic, ("blue", MIC_COLOR), 56, &frozen[0]),
-            meter(&system, ("orange", SYSTEM_COLOR), 56, &frozen[1]),
-        ];
+        let system_frozen = Frozen::default();
+        let system_meter = meter(
+            levels_from(&system),
+            ("orange", SYSTEM_COLOR),
+            56,
+            &system_frozen,
+        );
         let meters_box = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(18)
             .build();
-        meters_box.append(&meter_block("You (microphone)", &meters[0]));
-        meters_box.append(&meter_block("Computer audio", &meters[1]));
+        // Filled with a meter per microphone once the choice is known.
+        let mic_meters_box = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(18)
+            .build();
+        meters_box.append(&mic_meters_box);
+        let system_block = meter_block("Computer audio", "", &system_meter);
+        meters_box.append(&system_block);
 
         content.append(&meters_box);
 
@@ -856,8 +912,13 @@ impl Recorder {
 
         // Compact mode: only the two waves and the clock.
         let compact_meters = [
-            meter(&mic, ("blue", MIC_COLOR), 26, &frozen[0]),
-            meter(&system, ("orange", SYSTEM_COLOR), 26, &frozen[1]),
+            meter(levels_from(&mic), ("blue", MIC_COLOR), 26, &frozen[0]),
+            meter(
+                levels_from(&system),
+                ("orange", SYSTEM_COLOR),
+                26,
+                &frozen[1],
+            ),
         ];
         let compact_dot = gtk::Label::builder()
             .label("●")
@@ -956,12 +1017,20 @@ impl Recorder {
             webcam_camera: RefCell::new(webcam_camera),
             camera_row,
             cameras,
+            mics_row,
+            mic_rows: RefCell::default(),
+            computer_row,
+            computer_check,
             webcam: crate::webcam::Webcam::new(frames_tx),
             starting: Cell::new(false),
             awake: Cell::new(0),
             webcam_preview,
             animation,
-            meters,
+            mic_meters_box,
+            mic_meters: RefCell::default(),
+            system_meter,
+            system_block,
+            system_frozen,
             compact_meters,
             dot,
             timer,
@@ -1037,8 +1106,206 @@ impl Recorder {
         });
         recorder.connect_signals(&open_button, &new_button);
         recorder.connect_find(&find_close);
+        recorder.connect_mics();
         recorder.render();
         recorder
+    }
+
+    /// The Inputs row: filled now, and again every time it is opened or
+    /// the window comes to the front, so a microphone plugged in since then
+    /// shows up.
+    fn connect_mics(self: &Rc<Self>) {
+        self.fill_mic_rows();
+        let weak = Rc::downgrade(self);
+        self.window.connect_is_active_notify(move |window| {
+            if let Some(r) = weak.upgrade()
+                && window.is_active()
+                && matches!(r.state.get(), State::Idle | State::Done)
+            {
+                r.fill_mic_rows();
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.computer_check.connect_toggled(move |check| {
+            if let Some(r) = weak.upgrade() {
+                settings::save_computer_audio(check.is_active());
+                r.apply_mic_choice();
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.mics_row.connect_expanded_notify(move |row| {
+            if let Some(r) = weak.upgrade()
+                && row.is_expanded()
+            {
+                r.fill_mic_rows();
+            }
+        });
+    }
+
+    /// A row with a check box for every microphone there is now, ticked for
+    /// the ones recorded: none, one, or as many as you like. The computer
+    /// audio's row comes last.
+    fn fill_mic_rows(self: &Rc<Self>) {
+        let (present, default) = crate::audio::microphones();
+        let picked = crate::audio::pick_mics(&present, &default, settings::load_mics().as_deref());
+        let same = {
+            let rows = self.mic_rows.borrow();
+            rows.len() == present.len()
+                && rows.iter().zip(&present).all(|(row, mic)| {
+                    row.name == mic.name
+                        && row.label == mic.label
+                        && row.default == (mic.name == default)
+                        && row.check.is_active() == picked.contains(&mic.name)
+                })
+        };
+        // Filled before and nothing changed: left as it is, so an open list does not flicker.
+        if same && self.computer_row.parent().is_some() {
+            return;
+        }
+        for mic in self.mic_rows.borrow_mut().drain(..) {
+            self.mics_row.remove(&mic.row);
+        }
+        if self.computer_row.parent().is_some() {
+            self.mics_row.remove(&self.computer_row);
+        }
+        let mut rows = Vec::new();
+        for mic in &present {
+            let check = gtk::CheckButton::builder()
+                .active(picked.contains(&mic.name))
+                .valign(gtk::Align::Center)
+                .build();
+            let row = adw::ActionRow::builder()
+                .title(&mic.label)
+                .use_markup(false)
+                .activatable_widget(&check)
+                .build();
+            if mic.name == default {
+                row.set_subtitle("System default");
+            }
+            row.add_prefix(&check);
+            let weak = Rc::downgrade(self);
+            check.connect_toggled(move |_| {
+                if let Some(r) = weak.upgrade() {
+                    r.save_mic_choice();
+                }
+            });
+            self.mics_row.add_row(&row);
+            rows.push(MicRow {
+                name: mic.name.clone(),
+                label: mic.label.clone(),
+                default: mic.name == default,
+                row,
+                check,
+            });
+        }
+        *self.mic_rows.borrow_mut() = rows;
+        self.mics_row.add_row(&self.computer_row);
+        self.apply_mic_choice();
+    }
+
+    /// The microphones ticked, in the order of the list.
+    fn chosen_mics(&self) -> Vec<String> {
+        self.mic_rows
+            .borrow()
+            .iter()
+            .filter(|m| m.check.is_active())
+            .map(|m| m.name.clone())
+            .collect()
+    }
+
+    fn save_mic_choice(self: &Rc<Self>) {
+        settings::save_mics(&self.chosen_mics());
+        self.apply_mic_choice();
+    }
+
+    /// Records the inputs ticked, with a meter for each, and says which
+    /// they are. The last one ticked cannot be unticked: something is
+    /// always recorded.
+    fn apply_mic_choice(self: &Rc<Self>) {
+        let chosen = self.chosen_mics();
+        let computer = self.computer_check.is_active();
+        let alone = chosen.len() + usize::from(computer) == 1;
+        let mut labels = Vec::new();
+        for mic in self.mic_rows.borrow().iter() {
+            let on = mic.check.is_active();
+            mic.check.set_sensitive(!(on && alone));
+            if on {
+                labels.push(mic.label.clone());
+            }
+        }
+        self.computer_check.set_sensitive(!(computer && alone));
+        // No microphones listed at all: the default one, whatever it turns out to be.
+        let listed = !self.mic_rows.borrow().is_empty();
+        let meters: Vec<(String, String)> = if listed {
+            chosen.iter().cloned().zip(labels.iter().cloned()).collect()
+        } else {
+            vec![(crate::audio::DEFAULT_MIC.to_owned(), String::new())]
+        };
+        let mut summary = labels;
+        if computer {
+            summary.push("Computer audio".to_owned());
+        }
+        self.mics_row.set_subtitle(&summary.join(" + "));
+        // The sources are shared by all windows: not while one is recording.
+        let busy = self.starting.get()
+            || self
+                .hub
+                .upgrade()
+                .is_some_and(|hub| hub.recording().is_some());
+        if !busy {
+            let devices: Vec<String> = meters.iter().map(|(device, _)| device.clone()).collect();
+            self.mic.set_mics(&devices);
+            self.system
+                .set_input(computer.then_some(crate::audio::COMPUTER_AUDIO));
+            self.show_mic_meters(&meters);
+            self.system_block.set_visible(computer);
+            self.compact_meters[0].set_visible(!devices.is_empty());
+            self.compact_meters[1].set_visible(computer);
+        }
+    }
+
+    /// A meter for each of `mics` (device, label), each in its own colour,
+    /// under the microphone's name; one alone is "You (microphone)" as
+    /// before, with its name beside it.
+    fn show_mic_meters(&self, mics: &[(String, String)]) {
+        let shown: Vec<(String, String)> = self
+            .mic_meters
+            .borrow()
+            .iter()
+            .map(|m| (m.device.clone(), m.label.clone()))
+            .collect();
+        if shown == mics {
+            return;
+        }
+        for meter in self.mic_meters.borrow_mut().drain(..) {
+            self.mic_meters_box.remove(&meter.block);
+        }
+        let mut meters = Vec::new();
+        for (i, (device, label)) in mics.iter().enumerate() {
+            let frozen = Frozen::default();
+            let source = self.mic.clone();
+            let from = device.clone();
+            let area = meter(
+                move || source.levels_of(&from),
+                MIC_COLORS[i % MIC_COLORS.len()],
+                56,
+                &frozen,
+            );
+            let block = if mics.len() == 1 {
+                meter_block("You (microphone)", label, &area)
+            } else {
+                meter_block(label, "", &area)
+            };
+            self.mic_meters_box.append(&block);
+            meters.push(MicMeter {
+                device: device.clone(),
+                label: label.clone(),
+                block,
+                area,
+                frozen,
+            });
+        }
+        *self.mic_meters.borrow_mut() = meters;
     }
 
     fn connect_find(self: &Rc<Self>, find_close: &gtk::Button) {
@@ -1614,7 +1881,11 @@ impl Recorder {
                     if r.compact.get() {
                         r.compact_meters.iter().for_each(|m| m.queue_draw());
                     } else if r.layout.visible_child_name().as_deref() == Some("record") {
-                        r.meters.iter().for_each(|m| m.queue_draw());
+                        r.system_meter.queue_draw();
+                        r.mic_meters
+                            .borrow()
+                            .iter()
+                            .for_each(|m| m.area.queue_draw());
                     }
                 }
                 glib::ControlFlow::Continue
@@ -1966,6 +2237,8 @@ impl Recorder {
         );
         // A recording keeps its camera; it can be switched off, not swapped.
         self.camera_row.set_sensitive(matches!(state, State::Idle | State::Done));
+        // And its microphones.
+        self.mics_row.set_sensitive(matches!(state, State::Idle | State::Done));
         self.dot.set_visible(recording);
         self.compact_button.set_visible(recording);
         self.find_button.set_visible(state == State::Done);
@@ -2183,7 +2456,12 @@ impl Recorder {
         for (cell, source) in self.frozen.iter().zip([&self.mic, &self.system]) {
             *cell.borrow_mut() = frozen.then(|| source.levels());
         }
-        for meter in self.meters.iter().chain(self.compact_meters.iter()) {
+        *self.system_frozen.borrow_mut() = frozen.then(|| self.system.levels());
+        for meter in self.mic_meters.borrow().iter() {
+            *meter.frozen.borrow_mut() = frozen.then(|| self.mic.levels_of(&meter.device));
+            meter.area.queue_draw();
+        }
+        for meter in std::iter::once(&self.system_meter).chain(self.compact_meters.iter()) {
             meter.queue_draw();
         }
     }
@@ -2636,6 +2914,10 @@ impl Recorder {
                     audio_staging.join("mic.raw"),
                     audio_staging.join("system.raw"),
                 );
+                // More than one microphone: from here on they are one track.
+                if let Err(e) = crate::audio::mix_extra_tracks(&mic) {
+                    eprintln!("{APP_NAME}: mixing the microphones: {e}");
+                }
                 let audio = export_audio(&mic, &system, &audio_out, format);
                 let tracks = export_tracks(&mic, &system, &audio_out);
                 crate::webcam::export(&audio_staging, &audio_out, webcam);
@@ -4500,12 +4782,37 @@ fn format_elapsed(secs: i64) -> String {
     }
 }
 
+/// One microphone in the Microphones row, ticked when it is recorded.
+struct MicRow {
+    name: String,
+    label: String,
+    /// The system's default microphone.
+    default: bool,
+    row: adw::ActionRow,
+    check: gtk::CheckButton,
+}
+
+/// The meter of one microphone recorded.
+struct MicMeter {
+    device: String,
+    label: String,
+    block: gtk::Box,
+    area: gtk::DrawingArea,
+    frozen: Frozen,
+}
+
 /// What a meter shows while the recording is paused: the levels at the
 /// moment of pausing, dimmed and still.
 type Frozen = Rc<RefCell<Option<Vec<f32>>>>;
 
+/// A source's levels, for a meter.
+fn levels_from(source: &Source) -> impl Fn() -> Vec<f32> + 'static {
+    let source = source.clone();
+    move || source.levels()
+}
+
 fn meter(
-    source: &Source,
+    levels: impl Fn() -> Vec<f32> + 'static,
     (key, fallback): (&'static str, (f64, f64, f64)),
     height: i32,
     frozen: &Frozen,
@@ -4514,13 +4821,12 @@ fn meter(
         .content_height(height)
         .hexpand(true)
         .build();
-    let source = source.clone();
     let frozen = frozen.clone();
     area.set_draw_func(move |area, cr, width, height| {
         let (r, g, b) = crate::theme::color(key, fallback);
         let (width, height) = (f64::from(width), f64::from(height));
         let paused = frozen.borrow().is_some();
-        let levels = frozen.borrow().clone().unwrap_or_else(|| source.levels());
+        let levels = frozen.borrow().clone().unwrap_or_else(&levels);
         let dim = if paused { 0.3 } else { 1.0 };
         let mid = height / 2.0;
         let step = width / HISTORY as f64;
@@ -4560,18 +4866,32 @@ fn meter(
     area
 }
 
-fn meter_block(name: &str, meter: &gtk::DrawingArea) -> gtk::Box {
+/// A meter under its `name`, with `detail` after the name when there is one.
+fn meter_block(name: &str, detail: &str, meter: &gtk::DrawingArea) -> gtk::Box {
     let block = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(6)
         .build();
-    block.append(
+    let heading = gtk::Box::builder().spacing(8).build();
+    heading.append(
         &gtk::Label::builder()
             .label(name)
             .xalign(0.0)
             .css_classes(["heading"])
             .build(),
     );
+    if !detail.is_empty() {
+        heading.append(
+            &gtk::Label::builder()
+                .label(detail)
+                .xalign(0.0)
+                .hexpand(true)
+                .ellipsize(gtk::pango::EllipsizeMode::End)
+                .css_classes(["dim-label"])
+                .build(),
+        );
+    }
+    block.append(&heading);
     block.append(
         &gtk::Frame::builder()
             .child(meter)
